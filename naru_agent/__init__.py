@@ -15,3 +15,10 @@ __all__ = [
     "GuardrailResult",
     "EventBus",
 ]
+
+try:
+    from naru_agent.memory.mem0_manager import Mem0MemoryManager
+
+    __all__.append("Mem0MemoryManager")
+except ImportError:
+    pass

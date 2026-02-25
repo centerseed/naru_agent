@@ -1,9 +1,11 @@
 __pycache__/
 *.pyc
 .env
+.env.test
 *.egg-info/
 dist/
 build/
 .venv/
 memory_db/
 chroma_db/
+examples/test_memory_db/

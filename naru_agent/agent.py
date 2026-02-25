@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
+from typing import Any
+
 from naru_agent.llm.base import BaseLLM
 from naru_agent.tools.base import BaseTool
 from naru_agent.guardrails.base import BaseGuardrail
-from naru_agent.memory.manager import MemoryManager
 
 
 class Agent(BaseModel):
@@ -19,7 +20,7 @@ class Agent(BaseModel):
     system_prompt: str = ""
     llm: BaseLLM
     tools: list[BaseTool] = Field(default_factory=list)
-    memory: MemoryManager | None = None
+    memory: Any = None
     guardrails: list[BaseGuardrail] = Field(default_factory=list)
     max_iterations: int = 10
     metadata: dict = Field(default_factory=dict)

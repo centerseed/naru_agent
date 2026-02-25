@@ -272,6 +272,161 @@ class PostgresMemoryStore(MemoryStore):
     def get_all(self, user_id: str) -> list[MemoryItem]: ...
 ```
 
+## 記憶層 DB 設定
+
+naru_agent 提供兩種記憶後端，依需求選擇：
+
+### 方案 A：MemoryManager + ChromaDB（本地，適合開發）
+
+自帶 LLM 驅動的事實萃取邏輯，DB 存在本機。
+
+```python
+from naru_agent import MemoryManager
+from naru_agent.memory.stores.chroma import ChromaMemoryStore
+
+def embed(text: str) -> list[float]:
+    from google import genai
+    result = genai.Client(api_key="YOUR_KEY").models.embed_content(
+        model="models/gemini-embedding-001", contents=text
+    )
+    return result.embeddings[0].values
+
+memory = MemoryManager(
+    llm=llm,
+    store=ChromaMemoryStore(persist_dir="./memory_db"),
+    embed_fn=embed,
+)
+```
+
+### 方案 B：Mem0MemoryManager + pgvector（生產環境，支援三層記憶）
+
+使用 [mem0](https://github.com/mem0ai/mem0) 管理記憶，DB 可接 PostgreSQL（本地或 Neon）。
+
+#### 安裝
+
+```bash
+pip install mem0ai psycopg2-binary
+```
+
+#### 設定 PostgreSQL（以 Neon 為例）
+
+```python
+from mem0 import Memory
+from naru_agent.memory import Mem0MemoryManager
+
+config = {
+    "llm": {
+        "provider": "litellm",
+        "config": {"model": "gemini/gemini-2.5-flash-lite"},
+    },
+    "embedder": {
+        "provider": "gemini",
+        "config": {
+            "model": "models/gemini-embedding-001",
+            "api_key": "YOUR_GEMINI_API_KEY",
+        },
+    },
+    "vector_store": {
+        "provider": "pgvector",
+        "config": {
+            # Neon 請使用 non-pooler endpoint（避免與 mem0 內建 pool 衝突）
+            "connection_string": "postgresql://user:pass@host/dbname?sslmode=require",
+            "collection_name": "memories",       # 資料表名稱
+            "embedding_model_dims": 768,          # gemini-embedding-001 = 768 維
+        },
+    },
+    "version": "v1.1",
+}
+
+client = Memory.from_config(config)
+memory = Mem0MemoryManager(client=client)
+```
+
+#### 設定本地 PostgreSQL + pgvector
+
+```bash
+# 用 Docker 啟動（已含 pgvector extension）
+docker run -d \
+  -e POSTGRES_USER=mem0 \
+  -e POSTGRES_PASSWORD=mem0pass \
+  -e POSTGRES_DB=mem0db \
+  -p 5432:5432 \
+  pgvector/pgvector:pg16
+```
+
+```python
+config = {
+    # ... llm / embedder 同上 ...
+    "vector_store": {
+        "provider": "pgvector",
+        "config": {
+            "host": "localhost",
+            "port": 5432,
+            "dbname": "mem0db",
+            "user": "mem0",
+            "password": "mem0pass",
+            "collection_name": "memories",
+            "embedding_model_dims": 768,
+        },
+    },
+    "version": "v1.1",
+}
+```
+
+#### 三層記憶使用方式
+
+mem0 支援三種記憶模式，透過 `Mem0MemoryManager.add()` 的參數控制：
+
+```python
+# 1. 語義記憶（預設）：LLM 自動萃取重要事實
+#    適合：長期偏好、個人資訊、反覆出現的主題
+memory.add(user_id, messages)                    # infer=True 為預設值
+
+# 2. 短期記憶：原始對話直接存入，不經 LLM 改寫
+#    適合：需要保留完整原文、對話紀錄查詢
+memory.add(user_id, messages, infer=False)
+
+# 3. 程序記憶：Agent 學到的方法與操作步驟
+#    適合：Agent 從用戶回饋學習如何執行任務
+memory.add(
+    user_id, messages,
+    memory_type="procedural_memory",
+    agent_id="my_agent",
+)
+```
+
+#### 整合到 Agent
+
+```python
+from naru_agent import Agent, Runner
+
+agent = Agent(
+    name="Naru",
+    role="assistant",
+    llm=llm,
+    memory=memory,   # 直接帶入，Runner 會自動存取和注入記憶
+)
+
+runner = Runner(agent)
+
+# 第一次對話：記憶自動存進 pgvector
+runner.run("我喜歡台式料理，不喜歡麻辣", user_id="user_123")
+
+# 第二次對話：記憶自動從 DB 讀出，注入到 system prompt
+runner.run("今天晚餐吃什麼好？", user_id="user_123")
+```
+
+#### 注意事項
+
+| 項目 | 說明 |
+|------|------|
+| Neon 連線 | 使用 **non-pooler** endpoint，避免 mem0 內建 psycopg2 pool 與 Neon pooler 衝突 |
+| 向量維度 | Gemini `gemini-embedding-001` = **768 維**；OpenAI `text-embedding-3-small` = **1536 維**，兩者不可混用 |
+| 資料表 | mem0 自動建立，第一次執行時會在 DB 建立 `collection_name` 指定的資料表 |
+| SSL | Neon 必須加 `?sslmode=require`；本地 PostgreSQL 預設不需要 |
+
+---
+
 ## 設計原則
 
 1. **最小依賴** — 核心只需 pydantic + litellm + chromadb
