@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any
+from collections.abc import AsyncIterator
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from naru_agent.streaming import StreamChunk
 
 
 class BaseLLM(ABC):
@@ -27,6 +31,18 @@ class BaseLLM(ABC):
     ) -> Any:
         """Return a parsed object matching response_schema (a Pydantic model)."""
         ...
+
+    async def chat_stream(
+        self,
+        messages: list[dict[str, str]],
+        tools: list[dict] | None = None,
+        temperature: float = 0.3,
+        **kwargs: Any,
+    ) -> AsyncIterator[StreamChunk]:
+        """Async streaming chat. Override in subclasses that support streaming."""
+        raise NotImplementedError(f"{type(self).__name__} does not support streaming")
+        # Make this an async generator
+        yield  # type: ignore[misc]  # pragma: no cover
 
 
 class LLMResponse:

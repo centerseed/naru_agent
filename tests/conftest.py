@@ -1,8 +1,9 @@
-"""全域 Mock fixtures：MockLLM, MockMemoryStore, MockMem0Client"""
+"""全域 Mock fixtures：MockLLM, MockAsyncLLM, MockMemoryStore, MockMem0Client"""
 from __future__ import annotations
 
 import uuid
 from collections import deque
+from collections.abc import AsyncIterator
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -10,6 +11,7 @@ import pytest
 
 from naru_agent.llm.base import BaseLLM, LLMResponse
 from naru_agent.memory.base import MemoryItem, MemoryStore
+from naru_agent.streaming import StreamChunk
 
 
 # ---------------------------------------------------------------------------
@@ -76,6 +78,72 @@ class MockLLM(BaseLLM):
     ) -> Any:
         self.structured_calls.append({"messages": messages, "schema": response_schema})
         return self._structured_response
+
+
+# ---------------------------------------------------------------------------
+# MockAsyncLLM — extends MockLLM with chat_stream()
+# ---------------------------------------------------------------------------
+
+class MockAsyncLLM(MockLLM):
+    """MockLLM with streaming support for async tests."""
+
+    def __init__(self):
+        super().__init__()
+        self._stream_chunks: deque[list[StreamChunk]] = deque()
+
+    def set_stream_text(self, text: str) -> None:
+        """Set up a simple text stream: one chunk per char + done."""
+        chunks = []
+        for ch in text:
+            chunks.append(StreamChunk(delta_text=ch))
+        chunks.append(StreamChunk(finish_reason="stop", usage={"prompt_tokens": 10, "completion_tokens": len(text)}))
+        self._stream_chunks.append(chunks)
+
+    def set_stream_tool_call(
+        self,
+        name: str,
+        args: dict,
+        final_text: str = "Done",
+        tool_call_id: str = "tc_1",
+    ) -> None:
+        """Set up a tool call stream followed by a text stream."""
+        import json
+
+        args_str = json.dumps(args)
+        # First stream: tool call chunks
+        tc_chunks = [
+            StreamChunk(tool_call_deltas=[{"index": 0, "id": tool_call_id, "name": name, "arguments": ""}]),
+            StreamChunk(tool_call_deltas=[{"index": 0, "arguments": args_str}]),
+            StreamChunk(finish_reason="tool_calls", usage={"prompt_tokens": 10, "completion_tokens": 5}),
+        ]
+        self._stream_chunks.append(tc_chunks)
+
+        # Second stream: final text
+        text_chunks = []
+        for ch in final_text:
+            text_chunks.append(StreamChunk(delta_text=ch))
+        text_chunks.append(StreamChunk(finish_reason="stop", usage={"prompt_tokens": 8, "completion_tokens": len(final_text)}))
+        self._stream_chunks.append(text_chunks)
+
+    def queue_stream_sequence(self, chunks: list[StreamChunk]) -> None:
+        """Queue a complete sequence of stream chunks."""
+        self._stream_chunks.append(chunks)
+
+    async def chat_stream(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+        temperature: float = 0.3,
+        **kwargs: Any,
+    ) -> AsyncIterator[StreamChunk]:
+        self.chat_calls.append({"messages": messages, "tools": tools})
+        if self._stream_chunks:
+            chunks = self._stream_chunks.popleft()
+        else:
+            # Default: yield empty stop
+            chunks = [StreamChunk(finish_reason="stop", usage={"prompt_tokens": 0, "completion_tokens": 0})]
+        for chunk in chunks:
+            yield chunk
 
 
 # ---------------------------------------------------------------------------
@@ -183,6 +251,11 @@ def mock_mem0_client_oss() -> MockMem0Client:
 @pytest.fixture
 def mock_mem0_client_platform() -> MockMem0Client:
     return MockMem0Client(format="platform")
+
+
+@pytest.fixture
+def mock_async_llm() -> MockAsyncLLM:
+    return MockAsyncLLM()
 
 
 @pytest.fixture

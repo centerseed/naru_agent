@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import AsyncIterator
 from typing import Any
 
 import litellm
 
 from naru_agent.llm.base import BaseLLM, LLMResponse
+from naru_agent.streaming import StreamChunk
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +120,69 @@ class LiteLLMProvider(BaseLLM):
             raw=response,
             usage=self._extract_usage(response.usage),
         )
+
+    async def chat_stream(
+        self,
+        messages: list[dict[str, str]],
+        tools: list[dict] | None = None,
+        temperature: float | None = None,
+        **kwargs: Any,
+    ) -> AsyncIterator[StreamChunk]:
+        if self._should_apply_cache():
+            messages = self._apply_cache_control(messages)
+
+        params: dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": self.default_temperature if temperature is None else temperature,
+            "stream": True,
+            **self.extra,
+            **kwargs,
+        }
+        if self.api_key:
+            params["api_key"] = self.api_key
+        if self.api_base:
+            params["api_base"] = self.api_base
+        if tools:
+            params["tools"] = tools
+
+        response = await litellm.acompletion(**params)
+
+        async for chunk in response:
+            choice = chunk.choices[0] if chunk.choices else None
+            if choice is None:
+                continue
+
+            delta = choice.delta
+
+            # Extract text delta
+            delta_text = getattr(delta, "content", None)
+
+            # Extract tool call deltas
+            tool_call_deltas = []
+            if getattr(delta, "tool_calls", None):
+                for tc in delta.tool_calls:
+                    tc_delta: dict[str, Any] = {"index": getattr(tc, "index", 0)}
+                    if getattr(tc, "id", None):
+                        tc_delta["id"] = tc.id
+                    if getattr(tc, "function", None):
+                        if getattr(tc.function, "name", None):
+                            tc_delta["name"] = tc.function.name
+                        if getattr(tc.function, "arguments", None):
+                            tc_delta["arguments"] = tc.function.arguments
+                    tool_call_deltas.append(tc_delta)
+
+            # Extract usage from final chunk
+            usage = None
+            if getattr(chunk, "usage", None):
+                usage = self._extract_usage(chunk.usage)
+
+            yield StreamChunk(
+                delta_text=delta_text,
+                tool_call_deltas=tool_call_deltas,
+                finish_reason=getattr(choice, "finish_reason", None),
+                usage=usage,
+            )
 
     def chat_structured(
         self,

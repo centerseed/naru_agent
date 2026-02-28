@@ -7,19 +7,24 @@
 ```
 naru_agent/
 ├── agent.py              # Agent 定義
-├── runner.py             # ReAct 執行引擎
+├── runner.py             # ReAct 執行引擎（sync + async streaming）
+├── streaming.py          # StreamEvent 類型定義
 ├── events.py             # 輕量事件匯流排
 ├── llm/
-│   ├── base.py           # LLM 抽象介面
-│   └── litellm_provider.py  # LiteLLM 實作（100+ models, prompt caching）
+│   ├── base.py           # LLM 抽象介面（chat + chat_stream）
+│   └── litellm_provider.py  # LiteLLM 實作（100+ models, prompt caching, streaming）
 ├── memory/
 │   ├── base.py           # MemoryStore 介面
 │   ├── manager.py        # LLM 驅動的事實提取 + 和解
 │   ├── prompts.py        # 記憶用 prompt templates
 │   └── stores/
 │       └── chroma.py     # ChromaDB 後端
+├── session/
+│   ├── base.py           # BaseSessionStore 抽象介面
+│   ├── memory_store.py   # InMemorySessionStore（單 process）
+│   └── redis_store.py    # RedisSessionStore（多 instance 部署）
 ├── tools/
-│   ├── base.py           # BaseTool + @tool 裝飾器
+│   ├── base.py           # BaseTool + @tool 裝飾器（sync + async）
 │   └── builtin/
 │       └── rag.py        # 通用 RAG 查詢工具
 ├── tool_selection/
@@ -216,6 +221,94 @@ result = runner.run(
     message="幫我分類這批新收藏的文章",
 )
 print(result.content)
+```
+
+## Streaming + Session 管理
+
+`Runner.run_stream()` 提供 async streaming，搭配 `SessionStore` 實現 stateless 多 instance 部署。
+
+### 基本 Streaming
+
+```python
+from naru_agent import Runner
+
+runner = Runner(agent)
+
+async for event in runner.run_stream("你好"):
+    if event.type == "text_delta":
+        print(event.delta, end="", flush=True)
+    elif event.type == "tool_call_start":
+        print(f"\n[calling {event.name}...]")
+    elif event.type == "tool_result":
+        print(f"[{event.name} → {event.result[:50]}]")
+    elif event.type == "done":
+        print(f"\n[tokens: {event.usage}]")
+    elif event.type == "error":
+        print(f"\n[error: {event.error}]")
+```
+
+事件類型：`TextDeltaEvent` → `ToolCallStartEvent` → `ToolResultEvent` → `DoneEvent` | `ErrorEvent`
+
+### Session Store（多 instance 部署）
+
+```
+┌──────────┐     ┌──────────────┐     ┌──────────┐
+│ Instance1│────▶│    Redis     │◀────│ Instance2│
+│ (FastAPI)│     │              │     │ (FastAPI)│
+└──────────┘     └──────────────┘     └──────────┘
+     │                                      │
+     └──── SessionStore.get(session_id) ────┘
+           SessionStore.save(session_id)
+```
+
+每個 request 帶 `session_id`，`run_stream()` 開始時 load、結束時 save，任何 instance 都能處理：
+
+```python
+# Redis（生產環境）
+from naru_agent.session.redis_store import RedisSessionStore
+import redis.asyncio as aioredis
+
+store = RedisSessionStore(
+    aioredis.from_url("redis://localhost"),
+    ttl=3600,  # session 1 小時過期
+)
+
+# 或 InMemory（開發/單 process）
+from naru_agent.session import InMemorySessionStore
+store = InMemorySessionStore()
+
+# 搭配 streaming 使用
+async for event in runner.run_stream(
+    "接續上次對話",
+    session_id="user_123_session_abc",
+    session_store=store,
+):
+    yield event  # 轉發給 SSE / WebSocket
+```
+
+容錯設計：
+- `session_store.get()` 失敗 → 降級為無歷史，不中斷 stream
+- `session_store.save()` 失敗 → 仍然 yield `DoneEvent`，不遺失回應
+- Redis 資料損壞 → 回傳 None，自動重建 session
+
+### 並行工具執行
+
+`Runner.run()` 和 `run_stream()` 都支援多工具並行執行：
+
+```python
+# sync 用 ThreadPoolExecutor，async 用 asyncio.gather
+result = runner.run("查天氣和匯率")  # 兩個 tool 同時跑，不是依序等待
+```
+
+### 自定義 SessionStore
+
+```python
+from naru_agent.session.base import BaseSessionStore
+
+class PostgresSessionStore(BaseSessionStore):
+    async def get(self, session_id: str) -> list[dict] | None: ...
+    async def save(self, session_id: str, history: list[dict]) -> None: ...
+    async def delete(self, session_id: str) -> None: ...
 ```
 
 ## Tool Selection（動態工具篩選）
@@ -486,8 +579,10 @@ runner.run("今天晚餐吃什麼好？", user_id="user_123")
 ## 設計原則
 
 1. **最小依賴** — 核心只需 pydantic + litellm + chromadb
-2. **可插拔** — LLM、Memory Store、Guardrail、Tool Selector 都是介面，可替換實作
+2. **可插拔** — LLM、Memory Store、Session Store、Guardrail、Tool Selector 都是介面，可替換實作
 3. **per-user 記憶** — 所有操作以 user_id 為 scope，記憶自動提取和去重
-4. **不過度設計** — 沒有 Flow、沒有多 Agent 編排（需要時再加）
-5. **Tool 就是函數** — `@tool` 裝飾器讓任何函數變成 agent 工具
-6. **Token 效率** — Prompt caching + 動態工具篩選，減少無謂的 token 開銷
+4. **Stateless 部署** — Session Store 讓任何 instance 都能處理任何 request，不需 sticky session
+5. **容錯優先** — Session/Memory 操作失敗時降級而非崩潰，stream 不會因基礎設施問題中斷
+6. **Tool 就是函數** — `@tool` 裝飾器讓任何函數變成 agent 工具，sync/async 皆可
+7. **Token 效率** — Prompt caching + 動態工具篩選，減少無謂的 token 開銷
+8. **並行執行** — 多 tool calls 自動並行（sync: ThreadPoolExecutor, async: asyncio.gather）

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 from abc import ABC, abstractmethod
 from typing import Any, Callable, get_type_hints
@@ -17,6 +18,11 @@ class BaseTool(ABC):
     @abstractmethod
     def run(self, **kwargs: Any) -> str:
         ...
+
+    async def arun(self, **kwargs: Any) -> str:
+        """Async version of run(). Default uses run_in_executor for sync tools."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, lambda: self.run(**kwargs))
 
     def to_schema(self) -> dict:
         """Convert to OpenAI-compatible function calling schema."""
@@ -58,8 +64,28 @@ class FunctionTool(BaseTool):
         self.args_schema = args_schema or _schema_from_function(func)
 
     def run(self, **kwargs: Any) -> str:
+        if asyncio.iscoroutinefunction(self._func):
+            # Safe for nested event loops: create a new loop in a new thread
+            try:
+                asyncio.get_running_loop()
+                # Already in async context — cannot use asyncio.run()
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    future = pool.submit(asyncio.run, self._func(**kwargs))
+                    result = future.result()
+            except RuntimeError:
+                # No running loop — safe to use asyncio.run()
+                result = asyncio.run(self._func(**kwargs))
+            return str(result) if result is not None else ""
         result = self._func(**kwargs)
         return str(result) if result is not None else ""
+
+    async def arun(self, **kwargs: Any) -> str:
+        if asyncio.iscoroutinefunction(self._func):
+            result = await self._func(**kwargs)
+            return str(result) if result is not None else ""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, lambda: self.run(**kwargs))
 
 
 def tool(

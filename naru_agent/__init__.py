@@ -5,6 +5,15 @@ from naru_agent.memory.manager import MemoryManager
 from naru_agent.guardrails.base import BaseGuardrail, GuardrailResult
 from naru_agent.events import EventBus
 from naru_agent.tool_selection.base import BaseToolSelector, ToolSelectionResult
+from naru_agent.streaming import (
+    StreamEvent,
+    TextDeltaEvent,
+    ToolCallStartEvent,
+    ToolResultEvent,
+    DoneEvent,
+    ErrorEvent,
+)
+from naru_agent.session import BaseSessionStore, InMemorySessionStore
 
 __all__ = [
     "Agent",
@@ -17,6 +26,16 @@ __all__ = [
     "EventBus",
     "BaseToolSelector",
     "ToolSelectionResult",
+    # Streaming
+    "StreamEvent",
+    "TextDeltaEvent",
+    "ToolCallStartEvent",
+    "ToolResultEvent",
+    "DoneEvent",
+    "ErrorEvent",
+    # Session
+    "BaseSessionStore",
+    "InMemorySessionStore",
 ]
 
 try:
@@ -30,5 +49,12 @@ try:
     from naru_agent.tool_selection.embedding import EmbeddingToolSelector, litellm_embed_fn
 
     __all__ += ["EmbeddingToolSelector", "litellm_embed_fn"]
+except ImportError:
+    pass
+
+try:
+    from naru_agent.session.redis_store import RedisSessionStore
+
+    __all__.append("RedisSessionStore")
 except ImportError:
     pass
