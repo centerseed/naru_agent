@@ -262,36 +262,39 @@ def test_tool_selection_event_fires(mock_llm):
 
 
 # ---------------------------------------------------------------------------
-# 11. Cross-iteration used_tool_names tracking
+# 11. Multi-step tool use still works with selector
 # ---------------------------------------------------------------------------
 
-def test_cross_iteration_used_tool_names_tracking(mock_llm):
+def test_multi_step_tool_use_with_selector(mock_llm):
+    """Tools should still be available in later iterations so the LLM can
+    chain tool calls (e.g. get_schedule → create_training_plan)."""
     tools = _make_tools(15)
 
-    # First iteration: LLM calls get_weather, second iteration: final text
     mock_llm.queue_responses([
         LLMResponse(
             tool_calls=[{"id": "tc1", "name": "get_weather", "arguments": {"x": "Tokyo"}}],
             usage={"prompt_tokens": 10, "completion_tokens": 5},
         ),
-        LLMResponse(content="Final answer.", usage={"prompt_tokens": 8, "completion_tokens": 3}),
+        LLMResponse(
+            tool_calls=[{"id": "tc2", "name": "send_email", "arguments": {"x": "report"}}],
+            usage={"prompt_tokens": 15, "completion_tokens": 5},
+        ),
+        LLMResponse(content="Done, checked weather and sent email.", usage={"prompt_tokens": 8, "completion_tokens": 10}),
     ])
 
     agent = _make_agent(mock_llm, tools=tools)
     selector = EmbeddingToolSelector(
         embed_fn=_keyword_embed_fn, top_k=3, min_tools_to_filter=5,
     )
-    bus = EventBus()
-    events = []
-    bus.on("tool_selection", lambda d: events.append(d))
+    runner = Runner(agent, tool_selector=selector)
+    result = runner.run("check weather then email me")
 
-    runner = Runner(agent, event_bus=bus, tool_selector=selector)
-    result = runner.run("send email about the meeting schedule")
-
-    assert result.content == "Final answer."
-    # Second iteration's selection should include get_weather (used in first iteration)
-    assert len(events) == 2
-    assert "get_weather" in events[1]["selected_names"]
+    assert result.content == "Done, checked weather and sent email."
+    # All 3 LLM calls should have tools (not None)
+    assert mock_llm.chat_calls[0]["tools"] is not None
+    assert mock_llm.chat_calls[1]["tools"] is not None
+    # Third call also has tools (LLM chose not to call any)
+    assert mock_llm.chat_calls[2]["tools"] is not None
 
 
 # ---------------------------------------------------------------------------
@@ -343,3 +346,88 @@ def test_all_tools_below_threshold_returns_used_only():
     )
     selected_names = {t.name for t in result.selected_tools}
     assert selected_names == {"get_weather"}
+
+
+# ---------------------------------------------------------------------------
+# 15. Regression: flash-lite empty content → auto retry without tools
+# ---------------------------------------------------------------------------
+
+def test_empty_content_retry_without_tools(mock_llm):
+    """Regression test: flash-lite returns empty content when tool schemas are
+    present after a tool call.  The runner should detect this and retry once
+    without tools, recovering the text response."""
+    tools = _make_tools(15)
+
+    # Iter 1: tool call.  Iter 2: empty content (flash-lite bug).
+    # Retry (no tools): proper text.
+    mock_llm.queue_responses([
+        LLMResponse(
+            tool_calls=[{"id": "tc1", "name": "get_calendar", "arguments": {"x": "Monday"}}],
+            usage={"prompt_tokens": 1138, "completion_tokens": 14},
+        ),
+        LLMResponse(
+            content="",  # flash-lite returns empty
+            usage={"prompt_tokens": 800, "completion_tokens": 0},
+        ),
+        LLMResponse(
+            content="你的行事曆顯示週一有三堂課。",
+            usage={"prompt_tokens": 800, "completion_tokens": 45},
+        ),
+    ])
+
+    agent = _make_agent(mock_llm, tools=tools)
+    selector = EmbeddingToolSelector(
+        embed_fn=_keyword_embed_fn, top_k=5, min_tools_to_filter=5,
+    )
+    runner = Runner(agent, tool_selector=selector)
+    result = runner.run("幫我看一下課表")
+
+    assert result.content == "你的行事曆顯示週一有三堂課。"
+    assert result.blocked is False
+    # 3 LLM calls: tool call, empty response, retry without tools
+    assert len(mock_llm.chat_calls) == 3
+    # The retry call should have tools=None
+    assert mock_llm.chat_calls[2]["tools"] is None
+
+
+def test_empty_content_no_retry_without_prior_tool_use(mock_llm):
+    """If the LLM returns empty content on the FIRST iteration (no tools used
+    yet), do NOT retry — this is not the flash-lite bug."""
+    tools = _make_tools(15)
+
+    mock_llm.queue_responses([
+        LLMResponse(content="", usage={"prompt_tokens": 10, "completion_tokens": 0}),
+    ])
+
+    agent = _make_agent(mock_llm, tools=tools)
+    selector = EmbeddingToolSelector(
+        embed_fn=_keyword_embed_fn, top_k=5, min_tools_to_filter=5,
+    )
+    runner = Runner(agent, tool_selector=selector)
+    result = runner.run("hello")
+
+    assert result.content == ""
+    # Only 1 call — no retry
+    assert len(mock_llm.chat_calls) == 1
+
+
+def test_no_selector_still_sends_tools_after_use(mock_llm):
+    """Without a tool_selector, tools should always be sent (backward compat)."""
+    tools = _make_tools(5)
+
+    mock_llm.queue_responses([
+        LLMResponse(
+            tool_calls=[{"id": "tc1", "name": "get_weather", "arguments": {"x": "Taipei"}}],
+            usage={"prompt_tokens": 10, "completion_tokens": 5},
+        ),
+        LLMResponse(content="Done.", usage={"prompt_tokens": 8, "completion_tokens": 3}),
+    ])
+
+    agent = _make_agent(mock_llm, tools=tools)
+    runner = Runner(agent)  # no selector
+    result = runner.run("weather")
+
+    # Without selector, tools are always present
+    assert mock_llm.chat_calls[1]["tools"] is not None
+    assert len(mock_llm.chat_calls[1]["tools"]) == 5
+    assert result.content == "Done."

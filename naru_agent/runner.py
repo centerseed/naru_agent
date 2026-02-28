@@ -103,8 +103,16 @@ class Runner:
             })
 
             if not response.has_tool_calls:
-                # Done — final text response
                 final_content = response.content or ""
+
+                # Empty-content retry: lightweight models (e.g. flash-lite)
+                # sometimes return empty content when tool schemas are present
+                # but they have nothing to call.  Retry once without tools.
+                if not final_content.strip() and tools is not None and used_tool_names:
+                    logger.debug("Empty content with tools present; retrying without tools")
+                    retry_response = self.agent.llm.chat(messages=messages, tools=None)
+                    self._accumulate_usage(total_usage, retry_response.usage)
+                    final_content = retry_response.content or ""
 
                 # 4. Output guardrails
                 for guard in self.agent.guardrails:
@@ -257,8 +265,21 @@ class Runner:
 
             # Handle final response
             if finish_reason != "tool_calls" or not accumulated_tc_chunks:
-                # Done — text response
                 final_content = text_snapshot
+
+                # Empty-content retry: lightweight models (e.g. flash-lite)
+                # sometimes return empty content when tool schemas are present
+                # but they have nothing to call.  Retry once without tools.
+                if not final_content.strip() and tools is not None and used_tool_names:
+                    logger.debug("Empty content with tools present; retrying without tools (stream)")
+                    retry_text = ""
+                    async for chunk in self.agent.llm.chat_stream(messages=messages, tools=None):
+                        if chunk.delta_text:
+                            retry_text += chunk.delta_text
+                            yield TextDeltaEvent(delta=chunk.delta_text, snapshot=retry_text)
+                        if chunk.usage:
+                            self._accumulate_usage(total_usage, chunk.usage)
+                    final_content = retry_text
 
                 # Output guardrails
                 for guard in self.agent.guardrails:
