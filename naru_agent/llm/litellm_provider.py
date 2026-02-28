@@ -70,6 +70,11 @@ class LiteLLMProvider(BaseLLM):
                 }
         return data
 
+    _CACHE_SUPPORTED_PREFIXES = ("anthropic/", "claude-")
+
+    def _should_apply_cache(self) -> bool:
+        return self.enable_cache and self.model.startswith(self._CACHE_SUPPORTED_PREFIXES)
+
     def chat(
         self,
         messages: list[dict[str, str]],
@@ -77,7 +82,7 @@ class LiteLLMProvider(BaseLLM):
         temperature: float | None = None,
         **kwargs: Any,
     ) -> LLMResponse:
-        if self.enable_cache:
+        if self._should_apply_cache():
             messages = self._apply_cache_control(messages)
 
         params: dict[str, Any] = {
@@ -122,7 +127,7 @@ class LiteLLMProvider(BaseLLM):
         **kwargs: Any,
     ) -> Any:
         """Use response_format for structured output, then parse with Pydantic."""
-        if self.enable_cache:
+        if self._should_apply_cache():
             messages = self._apply_cache_control(messages)
 
         params: dict[str, Any] = {

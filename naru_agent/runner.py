@@ -105,9 +105,8 @@ class Runner:
                 return RunResult(content=final_content, usage=total_usage)
 
             # Execute tool calls
-            messages.append({
+            assistant_msg: dict[str, Any] = {
                 "role": "assistant",
-                "content": response.content,
                 "tool_calls": [
                     {
                         "id": tc["id"],
@@ -119,7 +118,10 @@ class Runner:
                     }
                     for tc in response.tool_calls
                 ],
-            })
+            }
+            if response.content is not None:
+                assistant_msg["content"] = response.content
+            messages.append(assistant_msg)
 
             for tc in response.tool_calls:
                 used_tool_names.add(tc["name"])

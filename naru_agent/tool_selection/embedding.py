@@ -45,6 +45,22 @@ def _tools_cache_key(tools: list[BaseTool]) -> str:
     return h.hexdigest()
 
 
+def litellm_embed_fn(model: str = "gemini/text-embedding-004") -> Callable[[list[str]], list[list[float]]]:
+    """Create an embed_fn using LiteLLM (works with Gemini, OpenAI, etc.).
+
+    Usage:
+        selector = EmbeddingToolSelector(embed_fn=litellm_embed_fn())
+        selector = EmbeddingToolSelector(embed_fn=litellm_embed_fn("text-embedding-3-small"))
+    """
+    import litellm as _litellm
+
+    def _embed(texts: list[str]) -> list[list[float]]:
+        resp = _litellm.embedding(model=model, input=texts)
+        return [d["embedding"] for d in resp.data]
+
+    return _embed
+
+
 class EmbeddingToolSelector(BaseToolSelector):
     """Select tools by embedding similarity between query and tool descriptions."""
 
@@ -73,19 +89,17 @@ class EmbeddingToolSelector(BaseToolSelector):
         if self._embed_fn is not None:
             return self._embed_fn
 
-        if self._model is None:
-            with self._model_lock:
-                if self._model is None:
-                    try:
-                        from sentence_transformers import SentenceTransformer
-                    except ImportError as e:
-                        raise ImportError(
-                            "sentence-transformers is required for EmbeddingToolSelector. "
-                            "Install it with: pip install naru_agent[embeddings]"
-                        ) from e
-                    self._model = SentenceTransformer(self._model_name)
-
-        model = self._model
+        with self._model_lock:
+            if self._model is None:
+                try:
+                    from sentence_transformers import SentenceTransformer
+                except ImportError as e:
+                    raise ImportError(
+                        "sentence-transformers is required for EmbeddingToolSelector. "
+                        "Install it with: pip install naru_agent[embeddings]"
+                    ) from e
+                self._model = SentenceTransformer(self._model_name)
+            model = self._model
 
         def _encode(texts: list[str]) -> list[list[float]]:
             embeddings = model.encode(texts, convert_to_numpy=True)
@@ -145,14 +159,13 @@ class EmbeddingToolSelector(BaseToolSelector):
         selected: list[BaseTool] = []
         selected_names: set[str] = set()
 
-        # Always include used tools first (capped to avoid exceeding budget)
+        # Always include used tools first, sorted by score, capped to avoid exceeding budget
         max_used = max(self.top_k // 2, 1)
-        for t in tools:
-            if len(selected) >= max_used:
-                break
-            if t.name in used_tool_names and t.name not in selected_names:
-                selected.append(t)
-                selected_names.add(t.name)
+        used_tools = [t for t in tools if t.name in used_tool_names]
+        used_tools.sort(key=lambda t: scores[t.name], reverse=True)
+        for t in used_tools[:max_used]:
+            selected.append(t)
+            selected_names.add(t.name)
 
         # Fill remaining slots with top-k by score (that pass threshold)
         for t in sorted_tools:

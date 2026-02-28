@@ -223,19 +223,23 @@ print(result.content)
 當工具數量多時（>10），每次 LLM 呼叫送出全部 schema 會浪費大量 tokens 並降低工具選擇準確率。Tool Selection 用 embedding 相似度在每次迭代中只挑出最相關的 top-k 個工具送給 LLM。
 
 ```python
-from naru_agent import Agent, Runner, EmbeddingToolSelector
+from naru_agent import EmbeddingToolSelector, litellm_embed_fn, Runner
 
-# 使用內建 sentence-transformers（需安裝 pip install naru_agent[embeddings]）
-selector = EmbeddingToolSelector(top_k=5)
-runner = Runner(agent, tool_selector=selector)
-
-# 或用自訂 embedding function（如 OpenAI/Gemini）
+# 推薦：用 LiteLLM embedding（Gemini 免費，不需額外安裝）
 selector = EmbeddingToolSelector(
-    embed_fn=my_embed_fn,  # (list[str]) -> list[list[float]]
+    embed_fn=litellm_embed_fn(),  # 預設 gemini/text-embedding-004
     top_k=5,
-    min_tools_to_filter=10,  # 工具數 ≤ 此值時跳過篩選
 )
 runner = Runner(agent, tool_selector=selector)
+
+# 也可指定其他 embedding model
+selector = EmbeddingToolSelector(
+    embed_fn=litellm_embed_fn("text-embedding-3-small"),  # OpenAI
+    top_k=5,
+)
+
+# 或用本地 sentence-transformers（離線、零 API 成本，需 pip install naru_agent[embeddings]）
+selector = EmbeddingToolSelector(top_k=5)  # 自動用 all-MiniLM-L6-v2
 ```
 
 特性：
@@ -247,21 +251,24 @@ runner = Runner(agent, tool_selector=selector)
 
 ## Prompt Caching
 
-LiteLLMProvider 預設對 system message 加上 `cache_control`，支援 Anthropic/Gemini 的 prompt caching，減少重複 token 開銷：
+LiteLLMProvider 對 Anthropic 模型自動啟用 system message 的 `cache_control`，減少重複 token 開銷：
 
 ```python
 from naru_agent.llm import LiteLLMProvider
 
-# 預設啟用
+# Anthropic 模型自動啟用 prompt caching
+llm = LiteLLMProvider(model="anthropic/claude-sonnet-4-20250514")
+
+# 非 Anthropic 模型不受影響（Gemini、OpenAI 等正常運作）
 llm = LiteLLMProvider(model="gemini/gemini-2.5-flash-lite")
 
-# 停用
-llm = LiteLLMProvider(model="...", enable_cache=False)
+# 明確停用
+llm = LiteLLMProvider(model="anthropic/claude-sonnet-4-20250514", enable_cache=False)
 ```
 
 cache 相關的 usage（`cache_creation_input_tokens`、`cache_read_input_tokens`）會自動出現在 `RunResult.usage` 中。
 
-## 事件監聯
+## 事件監聽
 
 ```python
 from naru_agent import EventBus

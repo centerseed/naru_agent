@@ -41,11 +41,25 @@ class TestApplyCacheControl:
         assert result == messages
 
     def test_enable_cache_false_skips_transform(self):
-        provider = LiteLLMProvider(enable_cache=False)
-        messages = [{"role": "system", "content": "System prompt"}]
-        # When enable_cache=False, chat() should not call _apply_cache_control.
-        # We verify by checking the provider flag.
-        assert provider.enable_cache is False
+        provider = LiteLLMProvider(model="anthropic/claude-sonnet-4-20250514", enable_cache=False)
+        assert provider._should_apply_cache() is False
+
+    def test_cache_only_applied_to_anthropic_models(self):
+        # Gemini — should NOT apply even with enable_cache=True
+        gemini = LiteLLMProvider(model="gemini/gemini-2.5-flash-lite", enable_cache=True)
+        assert gemini._should_apply_cache() is False
+
+        # OpenAI — should NOT apply
+        openai = LiteLLMProvider(model="gpt-4o", enable_cache=True)
+        assert openai._should_apply_cache() is False
+
+        # Anthropic — should apply
+        claude = LiteLLMProvider(model="anthropic/claude-sonnet-4-20250514", enable_cache=True)
+        assert claude._should_apply_cache() is True
+
+        # Claude shorthand — should apply
+        claude2 = LiteLLMProvider(model="claude-sonnet-4-20250514", enable_cache=True)
+        assert claude2._should_apply_cache() is True
 
 
 class TestExtractUsage:
