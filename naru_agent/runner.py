@@ -7,6 +7,7 @@ from typing import Any
 from naru_agent.agent import Agent
 from naru_agent.events import EventBus
 from naru_agent.llm.base import LLMResponse
+from naru_agent.tool_selection.base import BaseToolSelector
 
 logger = logging.getLogger(__name__)
 
@@ -19,9 +20,15 @@ class Runner:
         response = runner.run(user_id="user_123", message="推薦膝蓋友善的訓練")
     """
 
-    def __init__(self, agent: Agent, event_bus: EventBus | None = None):
+    def __init__(
+        self,
+        agent: Agent,
+        event_bus: EventBus | None = None,
+        tool_selector: BaseToolSelector | None = None,
+    ):
         self.agent = agent
         self.events = event_bus or EventBus()
+        self.tool_selector = tool_selector
 
     def run(
         self,
@@ -53,10 +60,15 @@ class Runner:
         messages.append({"role": "user", "content": message})
 
         # 3. ReAct loop
-        tools = self.agent.get_tool_schemas() if self.agent.tools else None
+        all_tool_schemas = self.agent.get_tool_schemas() if self.agent.tools else None
         total_usage: dict[str, int] = {}
+        used_tool_names: set[str] = set()
 
         for iteration in range(self.agent.max_iterations):
+            tools = self._select_tools_for_iteration(
+                messages, all_tool_schemas, used_tool_names,
+            )
+
             self.events.emit("before_llm_call", {
                 "iteration": iteration,
                 "message_count": len(messages),
@@ -82,7 +94,7 @@ class Runner:
 
                 # 5. Save to memory (non-blocking in future)
                 if self.agent.memory and user_id:
-                    all_msgs = conversation_history or []
+                    all_msgs = list(conversation_history) if conversation_history else []
                     all_msgs.append({"role": "user", "content": message})
                     all_msgs.append({"role": "assistant", "content": final_content})
                     try:
@@ -110,6 +122,7 @@ class Runner:
             })
 
             for tc in response.tool_calls:
+                used_tool_names.add(tc["name"])
                 self.events.emit("before_tool_call", {
                     "tool": tc["name"],
                     "arguments": tc["arguments"],
@@ -140,11 +153,54 @@ class Runner:
             usage=total_usage,
         )
 
+    def _select_tools_for_iteration(
+        self,
+        messages: list[dict],
+        all_tool_schemas: list[dict] | None,
+        used_tool_names: set[str],
+    ) -> list[dict] | None:
+        if all_tool_schemas is None or self.tool_selector is None:
+            return all_tool_schemas
+
+        # Build query from recent messages
+        query_parts: list[str] = []
+        for msg in reversed(messages):
+            if msg["role"] in ("user", "tool"):
+                content = msg.get("content", "")
+                query_parts.append(content[:200])
+                if msg["role"] == "user":
+                    break
+        query = " ".join(reversed(query_parts))
+
+        result = self.tool_selector.select_tools(
+            tools=self.agent.tools,
+            query=query,
+            context=messages,
+            used_tool_names=used_tool_names,
+        )
+
+        self.events.emit("tool_selection", {
+            "total_tools": len(result.all_tools),
+            "selected_tools": len(result.selected_tools),
+            "was_filtered": result.was_filtered,
+            "selected_names": [t.name for t in result.selected_tools],
+            "scores": result.scores,
+        })
+
+        if not result.was_filtered:
+            return all_tool_schemas
+
+        return [t.to_schema() for t in result.selected_tools]
+
     @staticmethod
     def _accumulate_usage(total: dict, usage: dict) -> None:
         for key, value in usage.items():
             if isinstance(value, (int, float)):
                 total[key] = total.get(key, 0) + value
+            elif isinstance(value, dict):
+                if key not in total:
+                    total[key] = {}
+                Runner._accumulate_usage(total[key], value)
 
 
 class RunResult:

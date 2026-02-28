@@ -11,7 +11,7 @@ naru_agent/
 ├── events.py             # 輕量事件匯流排
 ├── llm/
 │   ├── base.py           # LLM 抽象介面
-│   └── litellm_provider.py  # LiteLLM 實作（100+ models）
+│   └── litellm_provider.py  # LiteLLM 實作（100+ models, prompt caching）
 ├── memory/
 │   ├── base.py           # MemoryStore 介面
 │   ├── manager.py        # LLM 驅動的事實提取 + 和解
@@ -22,6 +22,9 @@ naru_agent/
 │   ├── base.py           # BaseTool + @tool 裝飾器
 │   └── builtin/
 │       └── rag.py        # 通用 RAG 查詢工具
+├── tool_selection/
+│   ├── base.py           # BaseToolSelector 介面 + ToolSelectionResult
+│   └── embedding.py      # Embedding 相似度篩選（optional dep）
 └── guardrails/
     ├── base.py           # Guardrail 介面
     └── keyword.py        # 關鍵字/正則 guardrail
@@ -215,7 +218,50 @@ result = runner.run(
 print(result.content)
 ```
 
-## 事件監聽
+## Tool Selection（動態工具篩選）
+
+當工具數量多時（>10），每次 LLM 呼叫送出全部 schema 會浪費大量 tokens 並降低工具選擇準確率。Tool Selection 用 embedding 相似度在每次迭代中只挑出最相關的 top-k 個工具送給 LLM。
+
+```python
+from naru_agent import Agent, Runner, EmbeddingToolSelector
+
+# 使用內建 sentence-transformers（需安裝 pip install naru_agent[embeddings]）
+selector = EmbeddingToolSelector(top_k=5)
+runner = Runner(agent, tool_selector=selector)
+
+# 或用自訂 embedding function（如 OpenAI/Gemini）
+selector = EmbeddingToolSelector(
+    embed_fn=my_embed_fn,  # (list[str]) -> list[list[float]]
+    top_k=5,
+    min_tools_to_filter=10,  # 工具數 ≤ 此值時跳過篩選
+)
+runner = Runner(agent, tool_selector=selector)
+```
+
+特性：
+- **opt-in**：不傳 `tool_selector` 時行為完全不變
+- **pluggable**：繼承 `BaseToolSelector` 可自訂策略
+- **smart fallback**：工具少時自動跳過篩選
+- **跨迭代追蹤**：已使用的工具在後續迭代中自動保留（上限 top_k/2）
+- **cache**：tool embeddings 自動 cache，description/schema 變更時自動失效
+
+## Prompt Caching
+
+LiteLLMProvider 預設對 system message 加上 `cache_control`，支援 Anthropic/Gemini 的 prompt caching，減少重複 token 開銷：
+
+```python
+from naru_agent.llm import LiteLLMProvider
+
+# 預設啟用
+llm = LiteLLMProvider(model="gemini/gemini-2.5-flash-lite")
+
+# 停用
+llm = LiteLLMProvider(model="...", enable_cache=False)
+```
+
+cache 相關的 usage（`cache_creation_input_tokens`、`cache_read_input_tokens`）會自動出現在 `RunResult.usage` 中。
+
+## 事件監聯
 
 ```python
 from naru_agent import EventBus
@@ -225,6 +271,9 @@ bus = EventBus()
 # 監控 token 使用量
 bus.on("after_llm_call", lambda data: print(f"LLM call #{data['iteration']}"))
 bus.on("after_tool_call", lambda data: print(f"Tool: {data['tool']}"))
+bus.on("tool_selection", lambda data: print(
+    f"Tools: {data['selected_tools']}/{data['total_tools']} selected"
+))
 
 runner = Runner(agent, event_bus=bus)
 ```
@@ -430,7 +479,8 @@ runner.run("今天晚餐吃什麼好？", user_id="user_123")
 ## 設計原則
 
 1. **最小依賴** — 核心只需 pydantic + litellm + chromadb
-2. **可插拔** — LLM、Memory Store、Guardrail 都是介面，可替換實作
+2. **可插拔** — LLM、Memory Store、Guardrail、Tool Selector 都是介面，可替換實作
 3. **per-user 記憶** — 所有操作以 user_id 為 scope，記憶自動提取和去重
 4. **不過度設計** — 沒有 Flow、沒有多 Agent 編排（需要時再加）
 5. **Tool 就是函數** — `@tool` 裝飾器讓任何函數變成 agent 工具
+6. **Token 效率** — Prompt caching + 動態工具篩選，減少無謂的 token 開銷

@@ -20,13 +20,55 @@ class LiteLLMProvider(BaseLLM):
         api_key: str | None = None,
         api_base: str | None = None,
         default_temperature: float = 0.3,
+        enable_cache: bool = True,
         **extra: Any,
     ):
         self.model = model
         self.api_key = api_key
         self.api_base = api_base
         self.default_temperature = default_temperature
+        self.enable_cache = enable_cache
         self.extra = extra
+
+    @staticmethod
+    def _apply_cache_control(messages: list[dict]) -> list[dict]:
+        """Add cache_control to system messages, converting content to block format."""
+        result = []
+        for msg in messages:
+            if msg.get("role") == "system":
+                content = msg.get("content", "")
+                if isinstance(content, str):
+                    content = [{"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}]
+                elif isinstance(content, list):
+                    content = [
+                        {**block, "cache_control": {"type": "ephemeral"}} if block.get("type") == "text" else {**block}
+                        for block in content
+                    ]
+                result.append({**msg, "content": content})
+            else:
+                result.append(msg)
+        return result
+
+    @staticmethod
+    def _extract_usage(usage: Any) -> dict:
+        """Extract usage dict including cache-related fields."""
+        data: dict[str, Any] = {
+            "prompt_tokens": usage.prompt_tokens,
+            "completion_tokens": usage.completion_tokens,
+            "total_tokens": usage.total_tokens,
+        }
+        if getattr(usage, "cache_creation_input_tokens", None) is not None:
+            data["cache_creation_input_tokens"] = usage.cache_creation_input_tokens
+        if getattr(usage, "cache_read_input_tokens", None) is not None:
+            data["cache_read_input_tokens"] = usage.cache_read_input_tokens
+        details = getattr(usage, "prompt_tokens_details", None)
+        if details:
+            detail_dict = details if isinstance(details, dict) else getattr(details, "__dict__", {})
+            if detail_dict:
+                data["prompt_tokens_details"] = {
+                    k: v for k, v in detail_dict.items() if isinstance(v, (int, float))
+                }
+        return data
 
     def chat(
         self,
@@ -35,10 +77,13 @@ class LiteLLMProvider(BaseLLM):
         temperature: float | None = None,
         **kwargs: Any,
     ) -> LLMResponse:
+        if self.enable_cache:
+            messages = self._apply_cache_control(messages)
+
         params: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
-            "temperature": temperature or self.default_temperature,
+            "temperature": self.default_temperature if temperature is None else temperature,
             **self.extra,
             **kwargs,
         }
@@ -66,11 +111,7 @@ class LiteLLMProvider(BaseLLM):
             content=message.content,
             tool_calls=tool_calls,
             raw=response,
-            usage={
-                "prompt_tokens": response.usage.prompt_tokens,
-                "completion_tokens": response.usage.completion_tokens,
-                "total_tokens": response.usage.total_tokens,
-            },
+            usage=self._extract_usage(response.usage),
         )
 
     def chat_structured(
@@ -81,6 +122,9 @@ class LiteLLMProvider(BaseLLM):
         **kwargs: Any,
     ) -> Any:
         """Use response_format for structured output, then parse with Pydantic."""
+        if self.enable_cache:
+            messages = self._apply_cache_control(messages)
+
         params: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
