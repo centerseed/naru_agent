@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import threading
 import uuid
+from collections import OrderedDict
 from datetime import datetime
 from typing import Any
 
@@ -42,6 +44,8 @@ class MemoryManager:
         results = manager.search("user_123", "what does the user prefer?")
     """
 
+    _SEEN_CACHE_MAX = 2048
+
     def __init__(
         self,
         llm: BaseLLM,
@@ -53,16 +57,22 @@ class MemoryManager:
         self.store = store
         self.embed_fn = embed_fn
         self._top_k = reconciliation_top_k
-        self._seen_hashes: set[str] = set()
+        self._seen_hashes: OrderedDict[str, None] = OrderedDict()
+        self._seen_hashes_lock = threading.Lock()
 
     def add(self, user_id: str, messages: list[dict[str, str]]) -> list[dict]:
         """Extract facts from messages and reconcile with existing memories."""
         conversation = self._format_messages(messages)
-        content_hash = hashlib.md5(conversation.encode()).hexdigest()
+        content_hash = hashlib.md5(
+            f"{user_id}:{conversation}".encode()
+        ).hexdigest()
 
-        if content_hash in self._seen_hashes:
-            return []
-        self._seen_hashes.add(content_hash)
+        with self._seen_hashes_lock:
+            if content_hash in self._seen_hashes:
+                return []
+            self._seen_hashes[content_hash] = None
+            if len(self._seen_hashes) > self._SEEN_CACHE_MAX:
+                self._seen_hashes.popitem(last=False)
 
         # Step 1: Extract facts via LLM
         facts = self._extract_facts(conversation)

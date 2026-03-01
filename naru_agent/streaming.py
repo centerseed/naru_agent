@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field
+
+# NOTE: This module is deprecated. Agno provides native streaming via NaruAgent.
 from typing import Literal, Union
 
 logger = logging.getLogger(__name__)

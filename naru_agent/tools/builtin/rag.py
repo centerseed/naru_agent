@@ -4,6 +4,9 @@ from typing import Any, Callable
 
 from naru_agent.tools.base import BaseTool
 
+# NOTE: This module is deprecated.
+# Use naru_agent.knowledge.ChromaKnowledgeStore with NaruAgent instead.
+
 
 class RAGTool(BaseTool):
     """Generic RAG query tool. Wraps any vector search function.

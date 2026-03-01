@@ -1,5 +1,6 @@
-from naru_agent.agent import Agent
-from naru_agent.runner import Runner
+import warnings
+
+from naru_agent.agent import Agent, NaruAgent, NaruResult
 from naru_agent.tools.base import BaseTool, tool
 from naru_agent.memory.manager import MemoryManager
 from naru_agent.guardrails.base import BaseGuardrail, GuardrailResult
@@ -14,8 +15,44 @@ from naru_agent.streaming import (
     ErrorEvent,
 )
 from naru_agent.session import BaseSessionStore, InMemorySessionStore
+from naru_agent.knowledge import BaseKnowledgeStore, KnowledgeResult
+from naru_agent.intent import BaseIntentClassifier, IntentResult, LLMIntentClassifier
+
+_RUNNER_WARNED = False
+
+
+def __getattr__(name: str):
+    """Lazy module attributes with deprecation warnings."""
+    global _RUNNER_WARNED
+    if name == "Runner":
+        if not _RUNNER_WARNED:
+            warnings.warn(
+                "Runner is deprecated. Use NaruAgent instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            _RUNNER_WARNED = True
+        from naru_agent.runner import Runner
+        return Runner
+    if name == "ChromaKnowledgeStore":
+        from naru_agent.knowledge.chroma_store import ChromaKnowledgeStore
+        return ChromaKnowledgeStore
+    raise AttributeError(f"module 'naru_agent' has no attribute {name!r}")
+
 
 __all__ = [
+    # New API
+    "NaruAgent",
+    "NaruResult",
+    # Knowledge
+    "BaseKnowledgeStore",
+    "KnowledgeResult",
+    "ChromaKnowledgeStore",
+    # Intent
+    "BaseIntentClassifier",
+    "IntentResult",
+    "LLMIntentClassifier",
+    # Legacy (kept for backward compat)
     "Agent",
     "Runner",
     "BaseTool",
