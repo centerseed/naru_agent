@@ -15,29 +15,29 @@ from naru_agent.streaming import (
     ErrorEvent,
 )
 from naru_agent.session import BaseSessionStore, InMemorySessionStore
-from naru_agent.knowledge import BaseKnowledgeStore, KnowledgeResult, ChromaKnowledgeStore
+from naru_agent.knowledge import BaseKnowledgeStore, KnowledgeResult
 from naru_agent.intent import BaseIntentClassifier, IntentResult, LLMIntentClassifier
 
+_RUNNER_WARNED = False
 
-class _RunnerProxy:
-    """Lazy proxy that emits a deprecation warning on first instantiation."""
 
-    _warned = False
-
-    def __new__(cls, *args, **kwargs):
-        if not _RunnerProxy._warned:
+def __getattr__(name: str):
+    """Lazy module attributes with deprecation warnings."""
+    global _RUNNER_WARNED
+    if name == "Runner":
+        if not _RUNNER_WARNED:
             warnings.warn(
                 "Runner is deprecated. Use NaruAgent instead.",
                 DeprecationWarning,
                 stacklevel=2,
             )
-            _RunnerProxy._warned = True
-        from naru_agent.runner import Runner as _Runner
-
-        return _Runner(*args, **kwargs)
-
-
-Runner = _RunnerProxy
+            _RUNNER_WARNED = True
+        from naru_agent.runner import Runner
+        return Runner
+    if name == "ChromaKnowledgeStore":
+        from naru_agent.knowledge.chroma_store import ChromaKnowledgeStore
+        return ChromaKnowledgeStore
+    raise AttributeError(f"module 'naru_agent' has no attribute {name!r}")
 
 
 __all__ = [

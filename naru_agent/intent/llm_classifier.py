@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from naru_agent.intent.base import BaseIntentClassifier, IntentResult
@@ -87,8 +88,6 @@ class LLMIntentClassifier(BaseIntentClassifier):
         handling cases like "Answer: YY" or "```YN```".
         Defaults to True for malformed responses.
         """
-        import re
-
         cleaned = raw.strip().upper()
         match = re.search(r"\b[YN]{2}\b", cleaned)
         if match:

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import atexit
 import logging
 import threading
 import time
+import weakref
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -130,6 +130,7 @@ class NaruAgent:
         tool_call_limit: int = 10,
         markdown: bool = False,
         temperature: float = 0.7,
+        prefetch_timeout: float = 10.0,
         # Session management
         db: Any | None = None,
         add_history_to_context: bool = False,
@@ -159,6 +160,7 @@ class NaruAgent:
         self.tool_call_limit = tool_call_limit
         self.markdown = markdown
         self.temperature = temperature
+        self.prefetch_timeout = prefetch_timeout
         # Session management
         self.add_history_to_context = add_history_to_context
         self.num_history_runs = num_history_runs
@@ -192,7 +194,14 @@ class NaruAgent:
         # by _agno_run_lock (LLM latency dwarfs lock overhead).
         self._agno_agent: AgnoAgent | None = None
         self._agno_run_lock = threading.Lock()
-        atexit.register(self._shutdown)
+        # weakref.finalize runs on GC (short-lived agents) or process exit
+        # (long-lived agents), avoiding atexit handler accumulation.
+        weakref.finalize(
+            self,
+            NaruAgent._shutdown_static,
+            self._prefetch_executor,
+            self._bg_executor,
+        )
 
     # ------------------------------------------------------------------
     # Public API
@@ -256,7 +265,7 @@ class NaruAgent:
 
         for key, future in futures_map.items():
             try:
-                val = future.result(timeout=10)
+                val = future.result(timeout=self.prefetch_timeout)
             except Exception:
                 logger.warning("Prefetch '%s' failed", key)
                 val = "" if key != "intent" else IntentResult(
@@ -295,9 +304,6 @@ class NaruAgent:
         for hr in hook_results:
             dynamic_instructions.append(hr)
 
-        # 4. Prepare tools
-        agno_tools = self._prepare_tools(intent.needs_tools)
-
         # 5. Run Agno Agent
         t_agent = time.perf_counter()
 
@@ -308,6 +314,9 @@ class NaruAgent:
             run_kwargs["session_id"] = session_id
 
         with self._agno_run_lock:
+            # 4. Prepare tools (inside lock — keeps tool preparation and agent
+            # mutation atomic, preventing fragile split if _prepare_tools evolves)
+            agno_tools = self._prepare_tools(intent.needs_tools)
             if self._agno_agent is None:
                 static_kwargs: dict[str, Any] = {
                     "model": self._get_agno_model(),
@@ -377,17 +386,15 @@ class NaruAgent:
                 try:
                     import litellm
 
-                    fallback_prompt = (
-                        "\n\n".join(dynamic_instructions)
-                        + "\n\n【Tool Results】\n"
-                        + "\n---\n".join(tool_results)
-                    )
+                    # Reconstruct the full multi-turn context so the fallback
+                    # model sees the structured tool call / result history
+                    # instead of a flattened text blob.
+                    fallback_messages: list[dict[str, Any]] = [
+                        {"role": "system", "content": "\n\n".join(dynamic_instructions)},
+                    ] + self._agno_messages_to_litellm(agno_result.messages)
                     kwargs: dict[str, Any] = {
                         "model": self.model_id,
-                        "messages": [
-                            {"role": "system", "content": fallback_prompt},
-                            {"role": "user", "content": message},
-                        ],
+                        "messages": fallback_messages,
                         "temperature": self.temperature,
                     }
                     if self.api_key:
@@ -496,8 +503,35 @@ class NaruAgent:
         except Exception:
             logger.exception("Background memory save failed for user_id=%s", user_id)
 
-    def _shutdown(self) -> None:
-        """Wait for pending background tasks before process exit."""
-        atexit.unregister(self._shutdown)
-        self._prefetch_executor.shutdown(wait=False, cancel_futures=True)
-        self._bg_executor.shutdown(wait=True, cancel_futures=False)
+    @staticmethod
+    def _agno_messages_to_litellm(messages: list[Any]) -> list[dict[str, Any]]:
+        """Convert Agno message objects to litellm-compatible message dicts."""
+        result: list[dict[str, Any]] = []
+        for msg in messages:
+            role = getattr(msg, "role", None)
+            if role not in ("user", "assistant", "tool"):
+                continue
+            content = getattr(msg, "content", None) or ""
+            d: dict[str, Any] = {"role": role, "content": content}
+            if role == "assistant":
+                tool_calls = getattr(msg, "tool_calls", None)
+                if tool_calls:
+                    d["tool_calls"] = tool_calls
+            elif role == "tool":
+                tool_call_id = getattr(msg, "tool_call_id", None)
+                if tool_call_id:
+                    d["tool_call_id"] = tool_call_id
+                name = getattr(msg, "name", None)
+                if name:
+                    d["name"] = name
+            result.append(d)
+        return result
+
+    @staticmethod
+    def _shutdown_static(
+        prefetch_exec: ThreadPoolExecutor,
+        bg_exec: ThreadPoolExecutor,
+    ) -> None:
+        """Executor cleanup — called by weakref.finalize on GC or process exit."""
+        prefetch_exec.shutdown(wait=False, cancel_futures=True)
+        bg_exec.shutdown(wait=True, cancel_futures=False)
