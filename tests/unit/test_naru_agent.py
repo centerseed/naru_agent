@@ -155,9 +155,8 @@ class TestIntentClassification:
 
         # Knowledge should NOT be searched when intent says NN
         assert not store.search_called
-        # Agent should be called without tools
-        call_kwargs = MockAgnoAgent.call_args[1]
-        assert call_kwargs["tools"] is None
+        # Agent should be called without tools (set as attribute, not kwarg)
+        assert mock_agno.tools is None
         assert result.intent.raw == "NN"
 
     def test_yy_intent_fetches_knowledge_and_tools(self):
@@ -195,11 +194,9 @@ class TestIntentClassification:
                     result = agent.chat("全馬跑爆了怎麼辦")
 
         assert store.search_called
-        call_kwargs = MockAgnoAgent.call_args[1]
-        assert call_kwargs["tools"] is not None
-        # Instructions should contain knowledge
-        instructions = call_kwargs["instructions"]
-        assert any("Knowledge" in i for i in instructions)
+        # tools and instructions are set as attributes after AgnoAgent creation
+        assert mock_agno.tools is not None
+        assert any("Knowledge" in i for i in mock_agno.instructions)
 
 
 class TestMemory:
@@ -222,8 +219,8 @@ class TestMemory:
                 result = agent.chat("hi", user_id="user_1")
 
         mock_memory.get_context_string.assert_called_once()
-        instructions = MockAgnoAgent.call_args[1]["instructions"]
-        assert any("Memory" in i for i in instructions)
+        # instructions are set as attribute after AgnoAgent creation
+        assert any("Memory" in i for i in mock_agno.instructions)
 
     def test_memory_save_in_background(self):
         mock_memory = MagicMock()
@@ -337,8 +334,8 @@ class TestPrefetchHooks:
                 result = agent.chat("hi")
 
         assert len(hook_called) == 1
-        instructions = MockAgnoAgent.call_args[1]["instructions"]
-        assert any("hook_data" in i for i in instructions)
+        # instructions are set as attribute after AgnoAgent creation
+        assert any("hook_data" in i for i in mock_agno.instructions)
 
 
 class TestEventBus:

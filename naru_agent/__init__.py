@@ -20,14 +20,18 @@ from naru_agent.intent import BaseIntentClassifier, IntentResult, LLMIntentClass
 
 
 class _RunnerProxy:
-    """Lazy proxy that emits a deprecation warning on first access."""
+    """Lazy proxy that emits a deprecation warning on first instantiation."""
+
+    _warned = False
 
     def __new__(cls, *args, **kwargs):
-        warnings.warn(
-            "Runner is deprecated. Use NaruAgent instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
+        if not _RunnerProxy._warned:
+            warnings.warn(
+                "Runner is deprecated. Use NaruAgent instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            _RunnerProxy._warned = True
         from naru_agent.runner import Runner as _Runner
 
         return _Runner(*args, **kwargs)

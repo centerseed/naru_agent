@@ -129,6 +129,7 @@ class NaruAgent:
         # Agno options
         tool_call_limit: int = 10,
         markdown: bool = False,
+        temperature: float = 0.7,
         # Session management
         db: Any | None = None,
         add_history_to_context: bool = False,
@@ -157,6 +158,7 @@ class NaruAgent:
         self.guardrails = guardrails or []
         self.tool_call_limit = tool_call_limit
         self.markdown = markdown
+        self.temperature = temperature
         # Session management
         self.add_history_to_context = add_history_to_context
         self.num_history_runs = num_history_runs
@@ -179,8 +181,17 @@ class NaruAgent:
         # Cache the Agno LiteLLM model instance (stateless, safe to reuse)
         self._agno_model = None
         self._model_lock = threading.Lock()
+        # Dedicated executor for parallel prefetch (intent, memory, RAG, hooks)
+        self._prefetch_executor = ThreadPoolExecutor(max_workers=4)
         # Shared executor for background tasks (memory save, etc.)
         self._bg_executor = ThreadPoolExecutor(max_workers=2)
+        # Cached AgnoAgent — recreated only on first call; instructions/tools
+        # are updated before each run. All persistent session state is stored
+        # in self.db (Agno DB) via session_id, so reusing the agent object is
+        # safe. Concurrent chat() calls on the same NaruAgent are serialized
+        # by _agno_run_lock (LLM latency dwarfs lock overhead).
+        self._agno_agent: AgnoAgent | None = None
+        self._agno_run_lock = threading.Lock()
         atexit.register(self._shutdown)
 
     # ------------------------------------------------------------------
@@ -225,42 +236,42 @@ class NaruAgent:
 
         # Phase A: intent + memory + custom hooks in parallel
         futures_map: dict[str, Any] = {}
-        with ThreadPoolExecutor(max_workers=4) as pool:
-            if self.memory and user_id:
-                futures_map["memory"] = pool.submit(
-                    self._fetch_memory, user_id, message
-                )
-            if self.intent_classifier:
-                futures_map["intent"] = pool.submit(
-                    self.intent_classifier.classify, message
-                )
-            for i, hook in enumerate(self.prefetch_hooks):
-                futures_map[f"hook_{i}"] = pool.submit(hook, message, user_id)
+        pool = self._prefetch_executor
+        if self.memory and user_id:
+            futures_map["memory"] = pool.submit(
+                self._fetch_memory, user_id, message
+            )
+        if self.intent_classifier:
+            futures_map["intent"] = pool.submit(
+                self.intent_classifier.classify, message
+            )
+        for i, hook in enumerate(self.prefetch_hooks):
+            futures_map[f"hook_{i}"] = pool.submit(hook, message, user_id)
 
-            # If no intent classifier, also fetch RAG in parallel (always needed)
-            if self.knowledge_store and not self.intent_classifier:
-                futures_map["knowledge"] = pool.submit(
-                    self._fetch_knowledge, message
+        # If no intent classifier, also fetch RAG in parallel (always needed)
+        if self.knowledge_store and not self.intent_classifier:
+            futures_map["knowledge"] = pool.submit(
+                self._fetch_knowledge, message
+            )
+
+        for key, future in futures_map.items():
+            try:
+                val = future.result(timeout=10)
+            except Exception:
+                logger.warning("Prefetch '%s' failed", key)
+                val = "" if key != "intent" else IntentResult(
+                    needs_knowledge=True, needs_tools=True, raw=""
                 )
 
-            for key, future in futures_map.items():
-                try:
-                    val = future.result(timeout=10)
-                except Exception:
-                    logger.warning("Prefetch '%s' failed", key)
-                    val = "" if key != "intent" else IntentResult(
-                        needs_knowledge=True, needs_tools=True, raw=""
-                    )
-
-                if key == "memory":
-                    memory_context = val or ""
-                elif key == "intent":
-                    intent = val
-                elif key == "knowledge":
-                    knowledge_text = val or ""
-                elif key.startswith("hook_"):
-                    if val:
-                        hook_results.append(str(val))
+            if key == "memory":
+                memory_context = val or ""
+            elif key == "intent":
+                intent = val
+            elif key == "knowledge":
+                knowledge_text = val or ""
+            elif key.startswith("hook_"):
+                if val:
+                    hook_results.append(str(val))
 
         # Phase B: fetch RAG only if intent says knowledge is needed
         if (
@@ -290,44 +301,40 @@ class NaruAgent:
         # 5. Run Agno Agent
         t_agent = time.perf_counter()
 
-        agent_kwargs: dict[str, Any] = {
-            "model": self._get_agno_model(),
-            "tools": agno_tools if agno_tools else None,
-            "instructions": dynamic_instructions,
-            "markdown": self.markdown,
-            "tool_call_limit": self.tool_call_limit,
-        }
-
-        # Session management
-        if self.db is not None:
-            agent_kwargs["db"] = self.db
-            agent_kwargs["add_history_to_context"] = self.add_history_to_context
-            if self.num_history_runs is not None:
-                agent_kwargs["num_history_runs"] = self.num_history_runs
-            if self.num_history_messages is not None:
-                agent_kwargs["num_history_messages"] = self.num_history_messages
-            if self.max_tool_calls_from_history is not None:
-                agent_kwargs["max_tool_calls_from_history"] = self.max_tool_calls_from_history
-
-        # Compression
-        if self.compress_tool_results:
-            agent_kwargs["compress_tool_results"] = True
-            if self.compression_manager is not None:
-                agent_kwargs["compression_manager"] = self.compression_manager
-
-        # Session summaries
-        if self.enable_session_summaries:
-            agent_kwargs["enable_session_summaries"] = True
-
-        agno_agent = AgnoAgent(**agent_kwargs)
-
         run_kwargs: dict[str, Any] = {}
         if user_id is not None:
             run_kwargs["user_id"] = user_id
         if session_id is not None:
             run_kwargs["session_id"] = session_id
 
-        agno_result = agno_agent.run(message, **run_kwargs)
+        with self._agno_run_lock:
+            if self._agno_agent is None:
+                static_kwargs: dict[str, Any] = {
+                    "model": self._get_agno_model(),
+                    "markdown": self.markdown,
+                    "tool_call_limit": self.tool_call_limit,
+                }
+                if self.db is not None:
+                    static_kwargs["db"] = self.db
+                    static_kwargs["add_history_to_context"] = self.add_history_to_context
+                    if self.num_history_runs is not None:
+                        static_kwargs["num_history_runs"] = self.num_history_runs
+                    if self.num_history_messages is not None:
+                        static_kwargs["num_history_messages"] = self.num_history_messages
+                    if self.max_tool_calls_from_history is not None:
+                        static_kwargs["max_tool_calls_from_history"] = self.max_tool_calls_from_history
+                if self.compress_tool_results:
+                    static_kwargs["compress_tool_results"] = True
+                    if self.compression_manager is not None:
+                        static_kwargs["compression_manager"] = self.compression_manager
+                if self.enable_session_summaries:
+                    static_kwargs["enable_session_summaries"] = True
+                self._agno_agent = AgnoAgent(**static_kwargs)
+
+            self._agno_agent.instructions = dynamic_instructions
+            self._agno_agent.tools = agno_tools if agno_tools else None
+            agno_result = self._agno_agent.run(message, **run_kwargs)
+
         timings["agent_run"] = time.perf_counter() - t_agent
 
         # Extract tool calls
@@ -381,7 +388,7 @@ class NaruAgent:
                             {"role": "system", "content": fallback_prompt},
                             {"role": "user", "content": message},
                         ],
-                        "temperature": 0.7,
+                        "temperature": self.temperature,
                     }
                     if self.api_key:
                         kwargs["api_key"] = self.api_key
@@ -491,4 +498,6 @@ class NaruAgent:
 
     def _shutdown(self) -> None:
         """Wait for pending background tasks before process exit."""
+        atexit.unregister(self._shutdown)
+        self._prefetch_executor.shutdown(wait=False, cancel_futures=True)
         self._bg_executor.shutdown(wait=True, cancel_futures=False)
