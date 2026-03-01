@@ -7,6 +7,8 @@ from collections.abc import AsyncGenerator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import TYPE_CHECKING, Any
 
+# NOTE: This module is deprecated. Use naru_agent.NaruAgent instead.
+
 from naru_agent.agent import Agent
 from naru_agent.events import EventBus
 from naru_agent.llm.base import LLMResponse

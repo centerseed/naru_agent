@@ -1,12 +1,29 @@
 from __future__ import annotations
 
+import logging
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
+from typing import Any, Callable
+
 from pydantic import BaseModel, Field
 
-from typing import Any
-
+from naru_agent.guardrails.base import BaseGuardrail, GuardrailResult
+from naru_agent.intent.base import BaseIntentClassifier, IntentResult
+from naru_agent.knowledge.base import BaseKnowledgeStore
 from naru_agent.llm.base import BaseLLM
+
+from agno.agent import Agent as AgnoAgent
+from agno.models.litellm import LiteLLM as AgnoLiteLLM
 from naru_agent.tools.base import BaseTool
-from naru_agent.guardrails.base import BaseGuardrail
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Legacy Agent (kept for backward compatibility)
+# ---------------------------------------------------------------------------
 
 
 class Agent(BaseModel):
@@ -47,3 +64,428 @@ class Agent(BaseModel):
             if t.name == name:
                 return t
         return None
+
+
+# ---------------------------------------------------------------------------
+# NaruResult
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class NaruResult:
+    """Result returned by NaruAgent.chat()."""
+
+    content: str = ""
+    blocked: bool = False
+    usage: dict = field(default_factory=dict)
+    intent: IntentResult | None = None
+    tool_calls: list[str] = field(default_factory=list)
+    timings: dict = field(default_factory=dict)
+    session_id: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# NaruAgent — Agno-powered orchestrator
+# ---------------------------------------------------------------------------
+
+
+class NaruAgent:
+    """High-level agent powered by Agno with built-in RAG, intent classification,
+    memory, and guardrails.
+
+    Usage::
+
+        agent = NaruAgent(
+            model="gemini/gemini-2.5-flash-lite",
+            instructions=["You are a helpful assistant."],
+            tools=[my_tool],
+            knowledge_store=my_store,
+            intent_classifier=my_classifier,
+            memory=my_memory,
+        )
+        result = agent.chat("Hello!", user_id="user_123")
+        print(result.content)
+    """
+
+    def __init__(
+        self,
+        model: str = "gemini/gemini-2.5-flash-lite",
+        api_key: str | None = None,
+        name: str = "assistant",
+        instructions: list[str] | None = None,
+        # Tools — accepts naru_agent BaseTool or Agno Toolkit instances
+        tools: list[Any] | None = None,
+        # RAG
+        knowledge_store: BaseKnowledgeStore | None = None,
+        knowledge_top_k: int = 3,
+        knowledge_min_score: float = 0.3,
+        # Intent
+        intent_classifier: BaseIntentClassifier | None = None,
+        # Memory — MemoryManager or Mem0MemoryManager
+        memory: Any | None = None,
+        # Guardrails
+        guardrails: list[BaseGuardrail] | None = None,
+        # Agno options
+        tool_call_limit: int = 10,
+        markdown: bool = False,
+        # Session management
+        db: Any | None = None,
+        add_history_to_context: bool = False,
+        num_history_runs: int | None = None,
+        num_history_messages: int | None = None,
+        max_tool_calls_from_history: int | None = None,
+        # Compression
+        compress_tool_results: bool = False,
+        compression_manager: Any | None = None,
+        # Session summaries
+        enable_session_summaries: bool = False,
+        # Extensions
+        event_bus: Any | None = None,
+        prefetch_hooks: list[Callable] | None = None,
+    ) -> None:
+        self.model_id = model
+        self.api_key = api_key
+        self.name = name
+        self.instructions = instructions or []
+        self.tools = tools or []
+        self.knowledge_store = knowledge_store
+        self.knowledge_top_k = knowledge_top_k
+        self.knowledge_min_score = knowledge_min_score
+        self.intent_classifier = intent_classifier
+        self.memory = memory
+        self.guardrails = guardrails or []
+        self.tool_call_limit = tool_call_limit
+        self.markdown = markdown
+        # Session management
+        self.add_history_to_context = add_history_to_context
+        self.num_history_runs = num_history_runs
+        self.num_history_messages = num_history_messages
+        self.max_tool_calls_from_history = max_tool_calls_from_history
+        # Compression
+        self.compress_tool_results = compress_tool_results
+        self.compression_manager = compression_manager
+        # Session summaries
+        self.enable_session_summaries = enable_session_summaries
+        # Auto-create InMemoryDb when history is enabled but no db given
+        if add_history_to_context and db is None:
+            from agno.db.in_memory import InMemoryDb
+            self.db = InMemoryDb()
+        else:
+            self.db = db
+        # Extensions
+        self.event_bus = event_bus
+        self.prefetch_hooks = prefetch_hooks or []
+        # Cache the Agno LiteLLM model instance (stateless, safe to reuse)
+        self._agno_model = None
+        self._model_lock = threading.Lock()
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def chat(
+        self,
+        message: str,
+        user_id: str | None = None,
+        session_id: str | None = None,
+    ) -> NaruResult:
+        """Send a message and get a response.
+
+        Orchestration flow:
+        1. Input guardrails
+        2. Parallel prefetch (memory, intent, RAG, custom hooks)
+        3. Build instructions based on intent
+        4. Run Agno Agent
+        5. Output guardrails
+        6. Background memory save
+        """
+        timings: dict[str, float] = {}
+        t0 = time.perf_counter()
+
+        # 1. Input guardrails
+        for guard in self.guardrails:
+            result = guard.check_input(message)
+            if not result.passed:
+                return NaruResult(
+                    content=result.modified_text or "Request blocked.",
+                    blocked=True,
+                    session_id=session_id,
+                )
+
+        # 2. Parallel prefetch (two phases if intent classifier exists)
+        t_prefetch = time.perf_counter()
+        memory_context = ""
+        intent = IntentResult(needs_knowledge=True, needs_tools=True, raw="")
+        knowledge_text = ""
+        hook_results: list[str] = []
+
+        # Phase A: intent + memory + custom hooks in parallel
+        futures_map: dict[str, Any] = {}
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            if self.memory and user_id:
+                futures_map["memory"] = pool.submit(
+                    self._fetch_memory, user_id, message
+                )
+            if self.intent_classifier:
+                futures_map["intent"] = pool.submit(
+                    self.intent_classifier.classify, message
+                )
+            for i, hook in enumerate(self.prefetch_hooks):
+                futures_map[f"hook_{i}"] = pool.submit(hook, message, user_id)
+
+            # If no intent classifier, also fetch RAG in parallel (always needed)
+            if self.knowledge_store and not self.intent_classifier:
+                futures_map["knowledge"] = pool.submit(
+                    self._fetch_knowledge, message
+                )
+
+            for key, future in futures_map.items():
+                try:
+                    val = future.result(timeout=10)
+                except Exception:
+                    logger.warning("Prefetch '%s' failed", key)
+                    val = "" if key != "intent" else IntentResult(
+                        needs_knowledge=True, needs_tools=True, raw=""
+                    )
+
+                if key == "memory":
+                    memory_context = val or ""
+                elif key == "intent":
+                    intent = val
+                elif key == "knowledge":
+                    knowledge_text = val or ""
+                elif key.startswith("hook_"):
+                    if val:
+                        hook_results.append(str(val))
+
+        # Phase B: fetch RAG only if intent says knowledge is needed
+        if (
+            self.knowledge_store
+            and self.intent_classifier
+            and intent.needs_knowledge
+        ):
+            knowledge_text = self._fetch_knowledge(message)
+
+        timings["prefetch"] = time.perf_counter() - t_prefetch
+
+        # 3. Build instructions
+        dynamic_instructions = list(self.instructions)
+
+        if intent.needs_knowledge and knowledge_text:
+            dynamic_instructions.append(f"\n【Knowledge】\n{knowledge_text}")
+
+        if memory_context:
+            dynamic_instructions.append(f"\n【Memory】\n{memory_context}")
+
+        for hr in hook_results:
+            dynamic_instructions.append(hr)
+
+        # 4. Prepare tools
+        agno_tools = self._prepare_tools(intent.needs_tools)
+
+        # 5. Run Agno Agent
+        t_agent = time.perf_counter()
+
+        agent_kwargs: dict[str, Any] = {
+            "model": self._get_agno_model(),
+            "tools": agno_tools if agno_tools else None,
+            "instructions": dynamic_instructions,
+            "markdown": self.markdown,
+            "tool_call_limit": self.tool_call_limit,
+        }
+
+        # Session management
+        if self.db is not None:
+            agent_kwargs["db"] = self.db
+            agent_kwargs["add_history_to_context"] = self.add_history_to_context
+            if self.num_history_runs is not None:
+                agent_kwargs["num_history_runs"] = self.num_history_runs
+            if self.num_history_messages is not None:
+                agent_kwargs["num_history_messages"] = self.num_history_messages
+            if self.max_tool_calls_from_history is not None:
+                agent_kwargs["max_tool_calls_from_history"] = self.max_tool_calls_from_history
+
+        # Compression
+        if self.compress_tool_results:
+            agent_kwargs["compress_tool_results"] = True
+            if self.compression_manager is not None:
+                agent_kwargs["compression_manager"] = self.compression_manager
+
+        # Session summaries
+        if self.enable_session_summaries:
+            agent_kwargs["enable_session_summaries"] = True
+
+        agno_agent = AgnoAgent(**agent_kwargs)
+
+        run_kwargs: dict[str, Any] = {}
+        if user_id is not None:
+            run_kwargs["user_id"] = user_id
+        if session_id is not None:
+            run_kwargs["session_id"] = session_id
+
+        agno_result = agno_agent.run(message, **run_kwargs)
+        timings["agent_run"] = time.perf_counter() - t_agent
+
+        # Extract tool calls
+        tool_calls_made: list[str] = []
+        if agno_result.messages:
+            for msg in agno_result.messages:
+                if hasattr(msg, "tool_calls") and msg.tool_calls:
+                    for tc in msg.tool_calls:
+                        if isinstance(tc, dict):
+                            fn = tc.get("function", {})
+                            name = fn.get("name", "?") if isinstance(fn, dict) else str(fn)
+                        else:
+                            name = getattr(
+                                getattr(tc, "function", None), "name", str(tc)
+                            )
+                        tool_calls_made.append(name)
+
+        # Extract usage
+        usage_info: dict[str, Any] = {}
+        if agno_result.metrics:
+            m = agno_result.metrics
+            total_in = m.input_tokens or 0
+            total_out = m.output_tokens or 0
+            usage_info = {
+                "input": total_in,
+                "output": total_out,
+                "total": total_in + total_out,
+            }
+
+        # Fallback: tool calls succeeded but content empty
+        response_text = agno_result.content or ""
+        if not response_text and agno_result.messages:
+            tool_results = [
+                getattr(m, "content", "")
+                for m in agno_result.messages
+                if getattr(m, "role", "") == "tool" and getattr(m, "content", "")
+            ]
+            if tool_results:
+                logger.info("Empty content after tool calls, falling back")
+                try:
+                    import litellm
+
+                    fallback_prompt = (
+                        "\n\n".join(dynamic_instructions)
+                        + "\n\n【Tool Results】\n"
+                        + "\n---\n".join(tool_results)
+                    )
+                    kwargs: dict[str, Any] = {
+                        "model": self.model_id,
+                        "messages": [
+                            {"role": "system", "content": fallback_prompt},
+                            {"role": "user", "content": message},
+                        ],
+                        "temperature": 0.7,
+                    }
+                    if self.api_key:
+                        kwargs["api_key"] = self.api_key
+                    fallback_resp = litellm.completion(**kwargs)
+                    response_text = fallback_resp.choices[0].message.content or ""
+                except Exception:
+                    logger.warning("Fallback completion also failed")
+
+        if not response_text:
+            response_text = "抱歉，我剛剛出了一點狀況，可以再說一次嗎？"
+
+        # 6. Output guardrails
+        for guard in self.guardrails:
+            result = guard.check_output(response_text)
+            if not result.passed:
+                response_text = result.modified_text or response_text
+
+        # 7. Background memory save
+        if (
+            self.memory
+            and user_id
+            and len(message) + len(response_text) > 100
+        ):
+            latest_turn = [
+                {"role": "user", "content": message},
+                {"role": "assistant", "content": response_text},
+            ]
+            threading.Thread(
+                target=self._save_memory_safe,
+                args=(user_id, latest_turn),
+                daemon=True,
+            ).start()
+
+        timings["total"] = time.perf_counter() - t0
+
+        if self.event_bus:
+            self.event_bus.emit("chat_complete", {
+                "timings": timings,
+                "tool_calls": tool_calls_made,
+                "intent": intent,
+            })
+
+        return NaruResult(
+            content=response_text,
+            usage=usage_info,
+            intent=intent,
+            tool_calls=tool_calls_made,
+            timings=timings,
+            session_id=session_id,
+        )
+
+    # ------------------------------------------------------------------
+    # Private helpers
+    # ------------------------------------------------------------------
+
+    def _get_agno_model(self):
+        """Return cached Agno LiteLLM model instance (thread-safe)."""
+        if self._agno_model is None:
+            with self._model_lock:
+                if self._agno_model is None:
+                    model_kwargs: dict[str, Any] = {"id": self.model_id}
+                    if self.api_key:
+                        model_kwargs["api_key"] = self.api_key
+                    self._agno_model = AgnoLiteLLM(**model_kwargs)
+        return self._agno_model
+
+    def _fetch_memory(self, user_id: str, message: str) -> str:
+        try:
+            return self.memory.get_context_string(user_id, message) or ""
+        except Exception:
+            logger.warning("Failed to get memory context for user_id=%s", user_id)
+            return ""
+
+    def _fetch_knowledge(self, message: str) -> str:
+        try:
+            results = self.knowledge_store.search(message, top_k=self.knowledge_top_k)
+            return self.knowledge_store.format_context(
+                results, min_score=self.knowledge_min_score
+            )
+        except Exception:
+            logger.warning("Knowledge fetch failed")
+            return ""
+
+    def _prepare_tools(self, needs_tools: bool) -> list[Any]:
+        """Convert tools to Agno-compatible format."""
+        if not needs_tools or not self.tools:
+            return []
+
+        from naru_agent.tools.agno_adapter import NaruToolkit
+
+        agno_tools: list[Any] = []
+        naru_tools: list[BaseTool] = []
+
+        for t in self.tools:
+            if isinstance(t, BaseTool):
+                naru_tools.append(t)
+            else:
+                # Assume it's already an Agno Toolkit
+                agno_tools.append(t)
+
+        if naru_tools:
+            adapter = NaruToolkit(naru_tools)
+            agno_tools.append(adapter.toolkit)
+
+        return agno_tools
+
+    def _save_memory_safe(self, user_id: str, messages: list[dict]) -> None:
+        try:
+            self.memory.add(user_id, messages)
+        except Exception:
+            logger.exception("Background memory save failed for user_id=%s", user_id)

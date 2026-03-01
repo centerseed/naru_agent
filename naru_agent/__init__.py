@@ -1,5 +1,6 @@
-from naru_agent.agent import Agent
-from naru_agent.runner import Runner
+import warnings
+
+from naru_agent.agent import Agent, NaruAgent, NaruResult
 from naru_agent.tools.base import BaseTool, tool
 from naru_agent.memory.manager import MemoryManager
 from naru_agent.guardrails.base import BaseGuardrail, GuardrailResult
@@ -14,8 +15,40 @@ from naru_agent.streaming import (
     ErrorEvent,
 )
 from naru_agent.session import BaseSessionStore, InMemorySessionStore
+from naru_agent.knowledge import BaseKnowledgeStore, KnowledgeResult, ChromaKnowledgeStore
+from naru_agent.intent import BaseIntentClassifier, IntentResult, LLMIntentClassifier
+
+
+class _RunnerProxy:
+    """Lazy proxy that emits a deprecation warning on first access."""
+
+    def __new__(cls, *args, **kwargs):
+        warnings.warn(
+            "Runner is deprecated. Use NaruAgent instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        from naru_agent.runner import Runner as _Runner
+
+        return _Runner(*args, **kwargs)
+
+
+Runner = _RunnerProxy
+
 
 __all__ = [
+    # New API
+    "NaruAgent",
+    "NaruResult",
+    # Knowledge
+    "BaseKnowledgeStore",
+    "KnowledgeResult",
+    "ChromaKnowledgeStore",
+    # Intent
+    "BaseIntentClassifier",
+    "IntentResult",
+    "LLMIntentClassifier",
+    # Legacy (kept for backward compat)
     "Agent",
     "Runner",
     "BaseTool",
