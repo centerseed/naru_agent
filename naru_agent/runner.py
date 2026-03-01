@@ -289,8 +289,8 @@ class Runner:
                     if not result.passed:
                         final_content = result.modified_text or final_content
 
-                # Save session
-                if session_id and session_store:
+                # Save session (skip if content is empty to avoid polluting history)
+                if session_id and session_store and final_content.strip():
                     try:
                         conv_msgs = [m for m in messages[1:]]
                         conv_msgs.append({"role": "assistant", "content": final_content})

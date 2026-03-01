@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import atexit
 import logging
 import threading
 import time
@@ -178,6 +179,9 @@ class NaruAgent:
         # Cache the Agno LiteLLM model instance (stateless, safe to reuse)
         self._agno_model = None
         self._model_lock = threading.Lock()
+        # Shared executor for background tasks (memory save, etc.)
+        self._bg_executor = ThreadPoolExecutor(max_workers=2)
+        atexit.register(self._shutdown)
 
     # ------------------------------------------------------------------
     # Public API
@@ -405,11 +409,7 @@ class NaruAgent:
                 {"role": "user", "content": message},
                 {"role": "assistant", "content": response_text},
             ]
-            threading.Thread(
-                target=self._save_memory_safe,
-                args=(user_id, latest_turn),
-                daemon=True,
-            ).start()
+            self._bg_executor.submit(self._save_memory_safe, user_id, latest_turn)
 
         timings["total"] = time.perf_counter() - t0
 
@@ -435,14 +435,13 @@ class NaruAgent:
 
     def _get_agno_model(self):
         """Return cached Agno LiteLLM model instance (thread-safe)."""
-        if self._agno_model is None:
-            with self._model_lock:
-                if self._agno_model is None:
-                    model_kwargs: dict[str, Any] = {"id": self.model_id}
-                    if self.api_key:
-                        model_kwargs["api_key"] = self.api_key
-                    self._agno_model = AgnoLiteLLM(**model_kwargs)
-        return self._agno_model
+        with self._model_lock:
+            if self._agno_model is None:
+                model_kwargs: dict[str, Any] = {"id": self.model_id}
+                if self.api_key:
+                    model_kwargs["api_key"] = self.api_key
+                self._agno_model = AgnoLiteLLM(**model_kwargs)
+            return self._agno_model
 
     def _fetch_memory(self, user_id: str, message: str) -> str:
         try:
@@ -489,3 +488,7 @@ class NaruAgent:
             self.memory.add(user_id, messages)
         except Exception:
             logger.exception("Background memory save failed for user_id=%s", user_id)
+
+    def _shutdown(self) -> None:
+        """Wait for pending background tasks before process exit."""
+        self._bg_executor.shutdown(wait=True, cancel_futures=False)

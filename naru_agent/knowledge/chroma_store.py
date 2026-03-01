@@ -76,6 +76,12 @@ class ChromaKnowledgeStore(BaseKnowledgeStore):
         """Ingest all markdown files from a directory.
 
         Splits by ``## Header`` sections. Returns number of chunks added.
+
+        Note:
+            Chunk IDs are derived from section headings. If a heading is
+            renamed, the old chunk remains in ChromaDB as stale data. Use
+            ``force=True`` to rebuild from scratch, or call
+            ``_client.delete_collection()`` manually when headings change.
         """
         directory = Path(directory)
         if force:

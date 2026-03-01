@@ -470,3 +470,78 @@ class TestSessionSupport:
             result = agent.chat("please block this", session_id="sess_abc")
         assert result.blocked is True
         assert result.session_id == "sess_abc"
+
+
+class TestFallbackLLMPath:
+    @staticmethod
+    def _make_empty_result_with_tool_msgs():
+        mock_result = MagicMock()
+        mock_result.content = ""
+        mock_tool_msg = MagicMock()
+        mock_tool_msg.role = "tool"
+        mock_tool_msg.content = "Tool output data"
+        mock_result.messages = [mock_tool_msg]
+        mock_result.metrics = MagicMock()
+        mock_result.metrics.input_tokens = 10
+        mock_result.metrics.output_tokens = 5
+        return mock_result
+
+    def test_fallback_called_when_content_empty_after_tool_calls(self):
+        """When Agno returns empty content but has tool results, fallback LLM is used."""
+        import litellm as real_litellm
+
+        agent = NaruAgent(model="test-model")
+        mock_result = self._make_empty_result_with_tool_msgs()
+
+        mock_resp = MagicMock()
+        mock_resp.choices = [MagicMock()]
+        mock_resp.choices[0].message.content = "Fallback response"
+
+        with patch("naru_agent.agent.AgnoAgent") as MockAgnoAgent:
+            mock_agno = MagicMock()
+            mock_agno.run.return_value = mock_result
+            MockAgnoAgent.return_value = mock_agno
+
+            with patch.object(agent, "_get_agno_model", return_value=MagicMock()):
+                with patch("litellm.completion", return_value=mock_resp) as mock_comp:
+                    result = agent.chat("test")
+
+        assert result.content == "Fallback response"
+        mock_comp.assert_called_once()
+
+    def test_default_message_when_no_tool_results(self):
+        """When Agno returns empty content and no tool messages, default message is used."""
+        agent = NaruAgent(model="test-model")
+
+        mock_result = MagicMock()
+        mock_result.content = ""
+        mock_result.messages = []
+        mock_result.metrics = MagicMock()
+        mock_result.metrics.input_tokens = 10
+        mock_result.metrics.output_tokens = 0
+
+        with patch("naru_agent.agent.AgnoAgent") as MockAgnoAgent:
+            mock_agno = MagicMock()
+            mock_agno.run.return_value = mock_result
+            MockAgnoAgent.return_value = mock_agno
+
+            with patch.object(agent, "_get_agno_model", return_value=MagicMock()):
+                result = agent.chat("test")
+
+        assert result.content == "抱歉，我剛剛出了一點狀況，可以再說一次嗎？"
+
+    def test_fallback_exception_returns_default_message(self):
+        """When fallback LLM throws an exception, default message is returned."""
+        agent = NaruAgent(model="test-model")
+        mock_result = self._make_empty_result_with_tool_msgs()
+
+        with patch("naru_agent.agent.AgnoAgent") as MockAgnoAgent:
+            mock_agno = MagicMock()
+            mock_agno.run.return_value = mock_result
+            MockAgnoAgent.return_value = mock_agno
+
+            with patch.object(agent, "_get_agno_model", return_value=MagicMock()):
+                with patch("litellm.completion", side_effect=Exception("API error")):
+                    result = agent.chat("test")
+
+        assert result.content == "抱歉，我剛剛出了一點狀況，可以再說一次嗎？"

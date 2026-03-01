@@ -90,7 +90,7 @@ class LLMIntentClassifier(BaseIntentClassifier):
         import re
 
         cleaned = raw.strip().upper()
-        match = re.search(r"[YN]{2}", cleaned)
+        match = re.search(r"\b[YN]{2}\b", cleaned)
         if match:
             code = match.group()
             return IntentResult(
