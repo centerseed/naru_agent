@@ -1,6 +1,13 @@
 import warnings
 
 from naru_agent.agent import Agent, NaruAgent, NaruResult
+from naru_agent.tracing import (
+    Trace,
+    Span,
+    TraceCollector,
+    BaseTraceExporter,
+    JSONLTraceExporter,
+)
 from naru_agent.tools.base import BaseTool, tool
 from naru_agent.memory.manager import MemoryManager
 from naru_agent.guardrails.base import BaseGuardrail, GuardrailResult
@@ -44,6 +51,12 @@ __all__ = [
     # New API
     "NaruAgent",
     "NaruResult",
+    # Tracing
+    "Trace",
+    "Span",
+    "TraceCollector",
+    "BaseTraceExporter",
+    "JSONLTraceExporter",
     # Knowledge
     "BaseKnowledgeStore",
     "KnowledgeResult",

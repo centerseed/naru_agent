@@ -6,7 +6,10 @@ import time
 import weakref
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
+
+if TYPE_CHECKING:
+    from naru_agent.tracing.trace import Trace
 
 from pydantic import BaseModel, Field
 
@@ -83,6 +86,8 @@ class NaruResult:
     tool_calls: list[str] = field(default_factory=list)
     timings: dict = field(default_factory=dict)
     session_id: str | None = None
+    trace_id: str | None = None
+    trace: Trace | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -145,6 +150,7 @@ class NaruAgent:
         # Extensions
         event_bus: Any | None = None,
         prefetch_hooks: list[Callable] | None = None,
+        trace_exporters: list[Any] | None = None,
     ) -> None:
         self.model_id = model
         self.api_key = api_key
@@ -178,8 +184,18 @@ class NaruAgent:
         else:
             self.db = db
         # Extensions
+        self._trace_exporters = trace_exporters or []
+        # Auto-create EventBus if trace_exporters provided without one
+        if self._trace_exporters and event_bus is None:
+            from naru_agent.events import EventBus
+            event_bus = EventBus()
         self.event_bus = event_bus
         self.prefetch_hooks = prefetch_hooks or []
+        # TraceCollector — wired only when both event_bus and trace_exporters exist
+        self._trace_collector: Any | None = None
+        if self.event_bus and self._trace_exporters:
+            from naru_agent.tracing.collector import TraceCollector
+            self._trace_collector = TraceCollector(self.event_bus)
         # Cache the Agno LiteLLM model instance (stateless, safe to reuse)
         self._agno_model = None
         self._model_lock = threading.Lock()
@@ -226,15 +242,21 @@ class NaruAgent:
         timings: dict[str, float] = {}
         t0 = time.perf_counter()
 
+        # Start trace
+        if self._trace_collector:
+            self._trace_collector.start_trace(message, user_id, session_id)
+
         # 1. Input guardrails
         for guard in self.guardrails:
             result = guard.check_input(message)
             if not result.passed:
-                return NaruResult(
+                blocked_result = NaruResult(
                     content=result.modified_text or "Request blocked.",
                     blocked=True,
                     session_id=session_id,
                 )
+                self._finish_and_export_trace(blocked_result)
+                return blocked_result
 
         # 2. Parallel prefetch (two phases if intent classifier exists)
         t_prefetch = time.perf_counter()
@@ -263,7 +285,9 @@ class NaruAgent:
                 self._fetch_knowledge, message
             )
 
+        prefetch_timings: dict[str, float] = {}
         for key, future in futures_map.items():
+            t_key = time.perf_counter()
             try:
                 val = future.result(timeout=self.prefetch_timeout)
             except Exception:
@@ -271,6 +295,7 @@ class NaruAgent:
                 val = "" if key != "intent" else IntentResult(
                     needs_knowledge=True, needs_tools=True, raw=""
                 )
+            prefetch_timings[key] = (time.perf_counter() - t_key) * 1000
 
             if key == "memory":
                 memory_context = val or ""
@@ -282,13 +307,41 @@ class NaruAgent:
                 if val:
                     hook_results.append(str(val))
 
+        # Emit memory/intent/knowledge events for tracing
+        if self.event_bus:
+            if "memory" in prefetch_timings:
+                self.event_bus.emit("memory_retrieved", {
+                    "user_id": user_id,
+                    "query": message,
+                    "items_count": memory_context.count("\n") + 1 if memory_context else 0,
+                    "latency_ms": prefetch_timings.get("memory"),
+                })
+            if "intent" in prefetch_timings:
+                self.event_bus.emit("intent_classified", {
+                    "result": intent,
+                    "latency_ms": prefetch_timings.get("intent"),
+                })
+            if "knowledge" in prefetch_timings:
+                self.event_bus.emit("knowledge_retrieved", {
+                    "query": message,
+                    "chunks_count": knowledge_text.count("\n") + 1 if knowledge_text else 0,
+                    "latency_ms": prefetch_timings.get("knowledge"),
+                })
+
         # Phase B: fetch RAG only if intent says knowledge is needed
         if (
             self.knowledge_store
             and self.intent_classifier
             and intent.needs_knowledge
         ):
+            t_rag = time.perf_counter()
             knowledge_text = self._fetch_knowledge(message)
+            if self.event_bus:
+                self.event_bus.emit("knowledge_retrieved", {
+                    "query": message,
+                    "chunks_count": knowledge_text.count("\n") + 1 if knowledge_text else 0,
+                    "latency_ms": (time.perf_counter() - t_rag) * 1000,
+                })
 
         timings["prefetch"] = time.perf_counter() - t_prefetch
 
@@ -342,7 +395,30 @@ class NaruAgent:
 
             self._agno_agent.instructions = dynamic_instructions
             self._agno_agent.tools = agno_tools if agno_tools else None
+
+            if self.event_bus:
+                self.event_bus.emit("before_llm_call", {
+                    "iteration": 0,
+                    "message_count": len(dynamic_instructions) + 1,
+                })
+
+            t_llm = time.perf_counter()
             agno_result = self._agno_agent.run(message, **run_kwargs)
+            llm_latency_ms = (time.perf_counter() - t_llm) * 1000
+
+            if self.event_bus:
+                self.event_bus.emit("after_llm_call", {
+                    "iteration": 0,
+                    "model": self.model_id,
+                    "has_tool_calls": bool(agno_result.messages and any(
+                        hasattr(m, "tool_calls") and m.tool_calls
+                        for m in agno_result.messages
+                    )),
+                    "response_content": agno_result.content or "",
+                    "tool_calls": [],
+                    "usage": {},
+                    "latency_ms": llm_latency_ms,
+                })
 
         timings["agent_run"] = time.perf_counter() - t_agent
 
@@ -434,7 +510,7 @@ class NaruAgent:
                 "intent": intent,
             })
 
-        return NaruResult(
+        final_result = NaruResult(
             content=response_text,
             usage=usage_info,
             intent=intent,
@@ -443,9 +519,23 @@ class NaruAgent:
             session_id=session_id,
         )
 
+        self._finish_and_export_trace(final_result)
+
+        return final_result
+
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    def _finish_and_export_trace(self, result: NaruResult) -> None:
+        """End the current trace, attach it to the result, and export."""
+        if not self._trace_collector:
+            return
+        trace = self._trace_collector.end_trace(result)
+        result.trace_id = trace.trace_id
+        result.trace = trace
+        for exporter in self._trace_exporters:
+            self._bg_executor.submit(exporter.export, trace)
 
     def _get_agno_model(self):
         """Return cached Agno LiteLLM model instance (thread-safe)."""
