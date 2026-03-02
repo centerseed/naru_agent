@@ -226,6 +226,7 @@ class NaruAgent:
             # Auto-align num_history_runs with keep_last_rounds
             if num_history_runs is None:
                 num_history_runs = compression_keep_last_rounds
+                self.num_history_runs = num_history_runs
             # Ensure history is enabled
             if not add_history_to_context:
                 logger.warning(
