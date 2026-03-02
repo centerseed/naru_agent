@@ -173,7 +173,7 @@ class NaruAgent:
         # Context compression (conversation history summarization)
         context_compression: bool = False,
         summary_store: Any | None = None,
-        summary_model: str = "ollama/gemma:12b",
+        summary_model: str = "gemini/gemma-3-12b-it",
         summary_api_base: str | None = None,
         compression_keep_last_rounds: int = 5,
         compression_threshold_rounds: int = 5,

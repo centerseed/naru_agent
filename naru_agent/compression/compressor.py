@@ -30,7 +30,7 @@ class ContextCompressor:
     def __init__(
         self,
         summary_store: BaseSummaryStore,
-        summary_model: str = "ollama/gemma:12b",
+        summary_model: str = "gemini/gemma-3-12b-it",
         summary_api_base: str | None = None,
         keep_last_rounds: int = 5,
         threshold_rounds: int = 5,
