@@ -34,10 +34,10 @@ class FakeSession:
 
 class FakeDb:
     def __init__(self, sessions: dict[str, FakeSession] | None = None):
-        self.sessions = sessions or {}
+        self._sessions = sessions or {}
 
-    def read(self, session_id: str):
-        return self.sessions.get(session_id)
+    def get_session(self, session_id: str, **kwargs):
+        return self._sessions.get(session_id)
 
 
 class TestContextCompressor:

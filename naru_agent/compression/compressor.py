@@ -120,12 +120,9 @@ class ContextCompressor:
             db = getattr(agno_agent, "db", None)
             if db is None:
                 return None
-            sessions = getattr(db, "sessions", None)
-            if sessions is None:
-                # Try reading from db
-                session = db.read(session_id)
-                return session
-            return sessions.get(session_id)
+            from agno.db.base import SessionType
+            session = db.get_session(session_id, session_type=SessionType.AGENT)
+            return session
         except Exception:
             logger.warning("Could not read session %s from agent db", session_id)
             return None
