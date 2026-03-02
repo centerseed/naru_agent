@@ -165,11 +165,18 @@ class NaruAgent:
         num_history_runs: int | None = None,
         num_history_messages: int | None = None,
         max_tool_calls_from_history: int | None = None,
-        # Compression
+        # Compression (Agno tool result compression)
         compress_tool_results: bool = False,
         compression_manager: Any | None = None,
         # Session summaries
         enable_session_summaries: bool = False,
+        # Context compression (conversation history summarization)
+        context_compression: bool = False,
+        summary_store: Any | None = None,
+        summary_model: str = "ollama/gemma:12b",
+        summary_api_base: str | None = None,
+        compression_keep_last_rounds: int = 5,
+        compression_threshold_rounds: int = 5,
         # Extensions
         event_bus: Any | None = None,
         prefetch_hooks: list[Callable] | None = None,
@@ -203,6 +210,29 @@ class NaruAgent:
         self.compression_manager = compression_manager
         # Session summaries
         self.enable_session_summaries = enable_session_summaries
+        # Context compression
+        self._context_compressor = None
+        if context_compression:
+            from naru_agent.compression.compressor import ContextCompressor
+            from naru_agent.compression.memory_store import InMemorySummaryStore
+            store = summary_store or InMemorySummaryStore()
+            self._context_compressor = ContextCompressor(
+                summary_store=store,
+                summary_model=summary_model,
+                summary_api_base=summary_api_base,
+                keep_last_rounds=compression_keep_last_rounds,
+                threshold_rounds=compression_threshold_rounds,
+            )
+            # Auto-align num_history_runs with keep_last_rounds
+            if num_history_runs is None:
+                num_history_runs = compression_keep_last_rounds
+            # Ensure history is enabled
+            if not add_history_to_context:
+                logger.warning(
+                    "context_compression=True requires add_history_to_context; "
+                    "forcing add_history_to_context=True"
+                )
+                add_history_to_context = True
         # Auto-create InMemoryDb when history is enabled but no db given
         if add_history_to_context and db is None:
             from agno.db.in_memory import InMemoryDb
@@ -291,7 +321,8 @@ class NaruAgent:
         knowledge_text = ""
         hook_results: list[str] = []
 
-        # Phase A: intent + memory + custom hooks in parallel
+        # Phase A: intent + memory + summary + custom hooks in parallel
+        summary_text = ""
         futures_map: dict[str, Any] = {}
         pool = self._prefetch_executor
         if self.memory and user_id:
@@ -301,6 +332,10 @@ class NaruAgent:
         if self.intent_classifier:
             futures_map["intent"] = pool.submit(
                 self.intent_classifier.classify, message
+            )
+        if self._context_compressor and session_id:
+            futures_map["summary"] = pool.submit(
+                self._context_compressor.get_summary_sync, session_id
             )
         for i, hook in enumerate(self.prefetch_hooks):
             futures_map[f"hook_{i}"] = pool.submit(hook, message, user_id)
@@ -329,6 +364,9 @@ class NaruAgent:
                 intent = val
             elif key == "knowledge":
                 knowledge_text = val or ""
+            elif key == "summary":
+                if val:
+                    summary_text = val.summary_text
             elif key.startswith("hook_"):
                 if val:
                     hook_results.append(str(val))
@@ -391,6 +429,11 @@ class NaruAgent:
 
         # 3. Build instructions
         dynamic_instructions = list(self.instructions)
+
+        if summary_text:
+            dynamic_instructions.append(
+                f"\n【Conversation History Summary】\n{summary_text}"
+            )
 
         if intent.needs_knowledge and knowledge_text:
             dynamic_instructions.append(f"\n【Knowledge】\n{knowledge_text}")
@@ -557,6 +600,13 @@ class NaruAgent:
                 {"role": "assistant", "content": response_text},
             ]
             self._bg_executor.submit(self._save_memory_safe, user_id, latest_turn)
+
+        # 8. Background context compression
+        if self._context_compressor and session_id and self._agno_agent:
+            agent_ref = self._agno_agent
+            self._bg_executor.submit(
+                self._context_compressor.maybe_compress, session_id, agent_ref,
+            )
 
         timings["total"] = time.perf_counter() - t0
 

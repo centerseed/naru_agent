@@ -22,6 +22,12 @@ from naru_agent.streaming import (
     ErrorEvent,
 )
 from naru_agent.session import BaseSessionStore, InMemorySessionStore
+from naru_agent.compression import (
+    BaseSummaryStore,
+    CompressedSummary,
+    ContextCompressor,
+    InMemorySummaryStore,
+)
 from naru_agent.knowledge import BaseKnowledgeStore, KnowledgeResult
 from naru_agent.intent import (
     BaseIntentClassifier,
@@ -96,6 +102,11 @@ __all__ = [
     # Session
     "BaseSessionStore",
     "InMemorySessionStore",
+    # Compression
+    "BaseSummaryStore",
+    "CompressedSummary",
+    "ContextCompressor",
+    "InMemorySummaryStore",
 ]
 
 try:
@@ -116,5 +127,12 @@ try:
     from naru_agent.session.redis_store import RedisSessionStore
 
     __all__.append("RedisSessionStore")
+except ImportError:
+    pass
+
+try:
+    from naru_agent.compression.redis_store import RedisSummaryStore
+
+    __all__.append("RedisSummaryStore")
 except ImportError:
     pass
