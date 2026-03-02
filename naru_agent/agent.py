@@ -141,6 +141,8 @@ class NaruAgent:
         instructions: list[str] | None = None,
         # Tools — accepts naru_agent BaseTool or Agno Toolkit instances
         tools: list[Any] | None = None,
+        # Tools always passed to the main LLM, unaffected by tool_calling_classifier
+        always_tools: list[Any] | None = None,
         # RAG
         knowledge_store: BaseKnowledgeStore | None = None,
         knowledge_top_k: int = 3,
@@ -179,6 +181,7 @@ class NaruAgent:
         self.instructions = instructions or []
         self.tools = tools or []
         self._naru_tools: list[BaseTool] = [t for t in self.tools if isinstance(t, BaseTool)]
+        self._always_tools: list[Any] = always_tools or []
         self.knowledge_store = knowledge_store
         self.knowledge_top_k = knowledge_top_k
         self.knowledge_min_score = knowledge_min_score
@@ -619,25 +622,34 @@ class NaruAgent:
             return ""
 
     def _prepare_tools(self, needs_tools: bool) -> list[Any]:
-        """Convert tools to Agno-compatible format."""
-        if not needs_tools or not self.tools:
-            return []
+        """Convert tools to Agno-compatible format.
 
+        always_tools are always appended regardless of needs_tools,
+        allowing write-side tools to bypass the tool_calling_classifier.
+        """
         from naru_agent.tools.agno_adapter import NaruToolkit
 
         agno_tools: list[Any] = []
-        naru_tools: list[BaseTool] = []
 
-        for t in self.tools:
-            if isinstance(t, BaseTool):
-                naru_tools.append(t)
-            else:
-                # Assume it's already an Agno Toolkit
-                agno_tools.append(t)
+        if needs_tools and self.tools:
+            naru_tools: list[BaseTool] = []
+            for t in self.tools:
+                if isinstance(t, BaseTool):
+                    naru_tools.append(t)
+                else:
+                    agno_tools.append(t)
+            if naru_tools:
+                agno_tools.append(NaruToolkit(naru_tools).toolkit)
 
-        if naru_tools:
-            adapter = NaruToolkit(naru_tools)
-            agno_tools.append(adapter.toolkit)
+        if self._always_tools:
+            always_naru: list[BaseTool] = []
+            for t in self._always_tools:
+                if isinstance(t, BaseTool):
+                    always_naru.append(t)
+                else:
+                    agno_tools.append(t)
+            if always_naru:
+                agno_tools.append(NaruToolkit(always_naru).toolkit)
 
         return agno_tools
 

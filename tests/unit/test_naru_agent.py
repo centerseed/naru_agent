@@ -542,3 +542,82 @@ class TestFallbackLLMPath:
                     result = agent.chat("test")
 
         assert result.content == "抱歉，我剛剛出了一點狀況，可以再說一次嗎？"
+
+
+# ---------------------------------------------------------------------------
+# TestAlwaysTools
+# ---------------------------------------------------------------------------
+
+
+class TestAlwaysTools:
+    """Tests for always_tools parameter in _prepare_tools."""
+
+    def _make_dummy_tool(self, name: str = "dummy"):
+        from naru_agent.tools.base import tool as tool_decorator
+
+        @tool_decorator(description=f"{name} tool")
+        def dummy(x: str) -> str:
+            return x
+
+        dummy.__name__ = name
+        return dummy
+
+    def test_always_tools_returned_when_needs_tools_false(self):
+        """always_tools 有工具、needs_tools=False → _prepare_tools(False) 回傳非空列表"""
+        dummy = self._make_dummy_tool()
+
+        with patch("naru_agent.tools.agno_adapter.NaruToolkit") as MockToolkit:
+            mock_tk = MagicMock()
+            mock_tk.toolkit = MagicMock()
+            MockToolkit.return_value = mock_tk
+
+            agent = NaruAgent(model="test-model", always_tools=[dummy])
+            result = agent._prepare_tools(needs_tools=False)
+
+        assert len(result) == 1
+        MockToolkit.assert_called_once_with([dummy])
+
+    def test_no_always_tools_needs_tools_false_returns_empty(self):
+        """always_tools=None、needs_tools=False → 回傳空列表（不迴歸）"""
+        agent = NaruAgent(model="test-model")
+        result = agent._prepare_tools(needs_tools=False)
+        assert result == []
+
+    def test_always_tools_basetool_wrapped_as_narutoolkit(self):
+        """always_tools 有 BaseTool → 被正確 wrap 為 NaruToolkit"""
+        from naru_agent.tools.base import BaseTool
+
+        dummy = self._make_dummy_tool()
+        assert isinstance(dummy, BaseTool)
+
+        with patch("naru_agent.tools.agno_adapter.NaruToolkit") as MockToolkit:
+            mock_tk = MagicMock()
+            mock_tk.toolkit = object()
+            MockToolkit.return_value = mock_tk
+
+            agent = NaruAgent(model="test-model", always_tools=[dummy])
+            result = agent._prepare_tools(needs_tools=False)
+
+        MockToolkit.assert_called_once_with([dummy])
+        assert result == [mock_tk.toolkit]
+
+    def test_always_tools_appended_alongside_regular_tools(self):
+        """needs_tools=True 時，regular tools 與 always_tools 都出現在結果中"""
+        read_tool = self._make_dummy_tool("read_tool")
+        write_tool = self._make_dummy_tool("write_tool")
+
+        with patch("naru_agent.tools.agno_adapter.NaruToolkit") as MockToolkit:
+            toolkit_instances = [MagicMock(), MagicMock()]
+            toolkit_instances[0].toolkit = object()
+            toolkit_instances[1].toolkit = object()
+            MockToolkit.side_effect = toolkit_instances
+
+            agent = NaruAgent(
+                model="test-model",
+                tools=[read_tool],
+                always_tools=[write_tool],
+            )
+            result = agent._prepare_tools(needs_tools=True)
+
+        assert MockToolkit.call_count == 2
+        assert len(result) == 2
