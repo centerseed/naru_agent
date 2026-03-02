@@ -1,0 +1,7 @@
+{
+  "simple_chat_max_tokens": 500,
+  "tool_call_16_tools_max_tokens": 8000,
+  "min_trace_spans_with_tools": 2,
+  "concurrent_users_must_all_succeed": true,
+  "max_response_time_seconds": 30
+}
