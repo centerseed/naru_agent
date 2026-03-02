@@ -23,7 +23,14 @@ from naru_agent.streaming import (
 )
 from naru_agent.session import BaseSessionStore, InMemorySessionStore
 from naru_agent.knowledge import BaseKnowledgeStore, KnowledgeResult
-from naru_agent.intent import BaseIntentClassifier, IntentResult, LLMIntentClassifier
+from naru_agent.intent import (
+    BaseIntentClassifier,
+    IntentResult,
+    LLMIntentClassifier,
+    BaseToolCallingClassifier,
+    LLMToolCallingClassifier,
+    ToolCallingResult,
+)
 
 _RUNNER_WARNED = False
 
@@ -65,6 +72,9 @@ __all__ = [
     "BaseIntentClassifier",
     "IntentResult",
     "LLMIntentClassifier",
+    "BaseToolCallingClassifier",
+    "LLMToolCallingClassifier",
+    "ToolCallingResult",
     # Legacy (kept for backward compat)
     "Agent",
     "Runner",

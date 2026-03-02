@@ -102,6 +102,7 @@ class Runner:
             self.events.emit("after_llm_call", {
                 "iteration": iteration,
                 "has_tool_calls": response.has_tool_calls,
+                "usage": response.usage,
             })
 
             if not response.has_tool_calls:

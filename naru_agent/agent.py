@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 
 from naru_agent.guardrails.base import BaseGuardrail, GuardrailResult
 from naru_agent.intent.base import BaseIntentClassifier, IntentResult
+from naru_agent.intent.tool_calling_classifier import BaseToolCallingClassifier
 from naru_agent.knowledge.base import BaseKnowledgeStore
 from naru_agent.llm.base import BaseLLM
 
@@ -97,19 +98,38 @@ class NaruResult:
 
 class NaruAgent:
     """High-level agent powered by Agno with built-in RAG, intent classification,
-    memory, and guardrails.
+    memory, guardrails, tool-calling classification, session history, and tracing.
 
-    Usage::
+    Minimal usage::
 
         agent = NaruAgent(
             model="gemini/gemini-2.5-flash-lite",
             instructions=["You are a helpful assistant."],
+        )
+        result = agent.chat("Hello!")
+        print(result.content)
+
+    Full-featured usage::
+
+        agent = NaruAgent(
+            model="gemini/gemini-2.5-flash-lite",
+            instructions=["You are a helpful assistant."],
+            # Tools & RAG
             tools=[my_tool],
             knowledge_store=my_store,
-            intent_classifier=my_classifier,
+            # Intent & tool calling classification
+            intent_classifier=LLMIntentClassifier(),
+            tool_calling_classifier=LLMToolCallingClassifier(),
+            # Memory & guardrails
             memory=my_memory,
+            guardrails=[my_guardrail],
+            # Session history (auto-creates InMemoryDb if db is None)
+            add_history_to_context=True,
+            num_history_runs=3,
+            # Tracing (auto-creates EventBus if not provided)
+            trace_exporters=[JSONLTraceExporter("traces.jsonl")],
         )
-        result = agent.chat("Hello!", user_id="user_123")
+        result = agent.chat("Hello!", user_id="user_123", session_id="s1")
         print(result.content)
     """
 
@@ -127,6 +147,7 @@ class NaruAgent:
         knowledge_min_score: float = 0.3,
         # Intent
         intent_classifier: BaseIntentClassifier | None = None,
+        tool_calling_classifier: BaseToolCallingClassifier | None = None,
         # Memory — MemoryManager or Mem0MemoryManager
         memory: Any | None = None,
         # Guardrails
@@ -157,10 +178,12 @@ class NaruAgent:
         self.name = name
         self.instructions = instructions or []
         self.tools = tools or []
+        self._naru_tools: list[BaseTool] = [t for t in self.tools if isinstance(t, BaseTool)]
         self.knowledge_store = knowledge_store
         self.knowledge_top_k = knowledge_top_k
         self.knowledge_min_score = knowledge_min_score
         self.intent_classifier = intent_classifier
+        self.tool_calling_classifier = tool_calling_classifier
         self.memory = memory
         self.guardrails = guardrails or []
         self.tool_call_limit = tool_call_limit
@@ -345,6 +368,24 @@ class NaruAgent:
 
         timings["prefetch"] = time.perf_counter() - t_prefetch
 
+        # Phase C: Tool calling classification
+        tool_calling_result = None
+        if self.tool_calling_classifier and intent.needs_tools and self._naru_tools:
+            t_tc = time.perf_counter()
+            try:
+                tool_calling_result = self.tool_calling_classifier.classify(
+                    message, self._naru_tools
+                )
+            except Exception:
+                logger.warning("Tool calling classifier failed", exc_info=True)
+            tc_latency = (time.perf_counter() - t_tc) * 1000
+            if self.event_bus and tool_calling_result:
+                self.event_bus.emit("tool_calling_classified", {
+                    "tools_called": [r["tool"] for r in tool_calling_result.tool_results],
+                    "usage": tool_calling_result.usage,
+                    "latency_ms": tc_latency,
+                })
+
         # 3. Build instructions
         dynamic_instructions = list(self.instructions)
 
@@ -356,6 +397,19 @@ class NaruAgent:
 
         for hr in hook_results:
             dynamic_instructions.append(hr)
+
+        # Inject tool results from classifier into instructions
+        if tool_calling_result and tool_calling_result.tool_results:
+            results_text = "\n".join(
+                f"[{r['tool']}] {r['result']}" for r in tool_calling_result.tool_results
+            )
+            dynamic_instructions.append(f"\n【Tool Results】\n{results_text}")
+            # Override intent so main agent doesn't carry tool schemas
+            intent = IntentResult(
+                needs_knowledge=intent.needs_knowledge,
+                needs_tools=False,
+                raw=intent.raw,
+            )
 
         # 5. Run Agno Agent
         t_agent = time.perf_counter()

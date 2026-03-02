@@ -99,7 +99,12 @@ agent = Agent(
 
 # --- Event Bus ---
 bus = EventBus()
-bus.on("before_llm_call", lambda d: print(f"  [LLM] 第 {d['iteration']+1} 次呼叫..."))
+bus.on("before_llm_call", lambda d: print(f"  [LLM] 第 {d['iteration']+1} 次呼叫開始 (messages: {d['message_count']})"))
+bus.on("after_llm_call", lambda d: print(
+    f"  [LLM] 第 {d['iteration']+1} 次呼叫 — "
+    f"prompt: {d.get('usage', {}).get('prompt_tokens', '?')}, "
+    f"completion: {d.get('usage', {}).get('completion_tokens', '?')}"
+))
 bus.on("after_tool_call", lambda d: print(f"  [Tool] {d['tool']} 回傳 {d['result_length']} 字"))
 
 # --- 互動測試 ---

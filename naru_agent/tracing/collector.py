@@ -29,6 +29,7 @@ class TraceCollector:
         event_bus.on("memory_retrieved", self._on_memory_retrieved)
         event_bus.on("intent_classified", self._on_intent_classified)
         event_bus.on("knowledge_retrieved", self._on_knowledge_retrieved)
+        event_bus.on("tool_calling_classified", self._on_tool_calling_classified)
 
     def start_trace(
         self,
@@ -172,6 +173,21 @@ class TraceCollector:
                 "raw": getattr(result, "raw", None),
             } if result else {},
             metadata={"latency_ms": data.get("latency_ms")},
+        )
+        span.finish()
+        self._current_trace.spans.append(span)
+
+    def _on_tool_calling_classified(self, data: dict) -> None:
+        if self._current_trace is None:
+            return
+        span = Span.create(
+            trace_id=self._current_trace.trace_id,
+            name="tool_calling_classify",
+            output={"tools_called": data.get("tools_called", [])},
+            metadata={
+                "usage": data.get("usage", {}),
+                "latency_ms": data.get("latency_ms"),
+            },
         )
         span.finish()
         self._current_trace.spans.append(span)
