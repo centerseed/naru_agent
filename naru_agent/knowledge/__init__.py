@@ -8,3 +8,10 @@ try:
     __all__.append("ChromaKnowledgeStore")
 except ImportError:
     pass
+
+try:
+    from naru_agent.knowledge.contextualizer import ChunkContextualizer
+
+    __all__.append("ChunkContextualizer")
+except ImportError:
+    pass

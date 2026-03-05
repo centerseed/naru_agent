@@ -57,6 +57,9 @@ def __getattr__(name: str):
     if name == "ChromaKnowledgeStore":
         from naru_agent.knowledge.chroma_store import ChromaKnowledgeStore
         return ChromaKnowledgeStore
+    if name == "ChunkContextualizer":
+        from naru_agent.knowledge.contextualizer import ChunkContextualizer
+        return ChunkContextualizer
     raise AttributeError(f"module 'naru_agent' has no attribute {name!r}")
 
 
@@ -74,6 +77,7 @@ __all__ = [
     "BaseKnowledgeStore",
     "KnowledgeResult",
     "ChromaKnowledgeStore",
+    "ChunkContextualizer",
     # Intent
     "BaseIntentClassifier",
     "IntentResult",

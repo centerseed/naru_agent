@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import uuid
 from pathlib import Path
 from typing import Any, Callable
 
@@ -72,6 +73,7 @@ class ChromaKnowledgeStore(BaseKnowledgeStore):
         directory: str | Path,
         force: bool = False,
         batch_size: int = 20,
+        contextualizer: "ChunkContextualizer | None" = None,
     ) -> int:
         """Ingest all markdown files from a directory.
 
@@ -99,7 +101,17 @@ class ChromaKnowledgeStore(BaseKnowledgeStore):
         all_chunks: list[dict[str, Any]] = []
         for md_file in md_files:
             rel_path = md_file.relative_to(directory)
-            all_chunks.extend(self._parse_markdown(md_file, id_prefix=str(rel_path.with_suffix(""))))
+            # Read once and pass to _parse_markdown to avoid a second read.
+            full_doc = md_file.read_text(encoding="utf-8")
+            chunks = self._parse_markdown(
+                md_file,
+                id_prefix=str(rel_path.with_suffix("")),
+                content=full_doc,
+            )
+            if contextualizer:
+                for c in chunks:
+                    c["text"] = contextualizer.contextualize(c["text"], full_doc)
+            all_chunks.extend(chunks)
 
         if not all_chunks:
             return 0
@@ -110,19 +122,12 @@ class ChromaKnowledgeStore(BaseKnowledgeStore):
             logger.info("All %d chunks already ingested, skipping.", len(all_chunks))
             return 0
 
-        total_added = 0
-        for i in range(0, len(new_chunks), batch_size):
-            batch = new_chunks[i : i + batch_size]
-            texts = [c["text"] for c in batch]
-            embeddings = self._embed_fn(texts)
-            self._collection.add(
-                ids=[c["id"] for c in batch],
-                documents=texts,
-                embeddings=embeddings,
-                metadatas=[c["metadata"] for c in batch],
-            )
-            total_added += len(batch)
-
+        total_added = self._add_batched(
+            texts=[c["text"] for c in new_chunks],
+            ids=[c["id"] for c in new_chunks],
+            metadatas=[c["metadata"] for c in new_chunks],
+            batch_size=batch_size,
+        )
         logger.info(
             "Ingested %d new chunks (total: %d)",
             total_added,
@@ -130,10 +135,80 @@ class ChromaKnowledgeStore(BaseKnowledgeStore):
         )
         return total_added
 
+    def batch_ingest(
+        self,
+        texts: list[str],
+        metadatas: list[dict] | None = None,
+        ids: list[str] | None = None,
+        contextualizer: "ChunkContextualizer | None" = None,
+        document_context: str = "",
+        batch_size: int = 20,
+    ) -> int:
+        """批次 ingest 任意文字清單。
+
+        Args:
+            texts: chunk 文字清單
+            metadatas: 對應的 metadata（可選）
+            ids: 自訂 chunk ID（可選，預設自動生成 UUID）
+            contextualizer: 若提供則為每個 chunk 補充定位上下文
+            document_context: 整份文件原文，供 contextualizer 理解 chunk 所處脈絡
+            batch_size: 每批 embed 的數量
+        """
+        if not texts:
+            return 0
+
+        if contextualizer and not document_context:
+            logger.warning(
+                "batch_ingest: contextualizer provided but document_context is empty; "
+                "context quality may be degraded."
+            )
+
+        if ids is None:
+            ids = [str(uuid.uuid4()) for _ in texts]
+        if metadatas is None:
+            metadatas = [{} for _ in texts]
+
+        final_texts = (
+            [contextualizer.contextualize(t, document_context) for t in texts]
+            if contextualizer
+            else texts
+        )
+
+        total_added = self._add_batched(
+            texts=final_texts,
+            ids=ids,
+            metadatas=metadatas,
+            batch_size=batch_size,
+        )
+        logger.info("batch_ingest: added %d chunks", total_added)
+        return total_added
+
+    def _add_batched(
+        self,
+        texts: list[str],
+        ids: list[str],
+        metadatas: list[dict],
+        batch_size: int,
+    ) -> int:
+        """Embed and add texts to the collection in batches."""
+        total_added = 0
+        for i in range(0, len(texts), batch_size):
+            batch_texts = texts[i : i + batch_size]
+            embeddings = self._embed_fn(batch_texts)
+            self._collection.add(
+                ids=ids[i : i + batch_size],
+                documents=batch_texts,
+                embeddings=embeddings,
+                metadatas=metadatas[i : i + batch_size],
+            )
+            total_added += len(batch_texts)
+        return total_added
+
     @staticmethod
     def _parse_markdown(
         filepath: Path,
         id_prefix: str | None = None,
+        content: str | None = None,
     ) -> list[dict[str, Any]]:
         """Parse a markdown file into chunks, split by ``## Header``.
 
@@ -141,8 +216,10 @@ class ChromaKnowledgeStore(BaseKnowledgeStore):
             filepath: Path to the markdown file.
             id_prefix: Prefix for chunk IDs (defaults to file stem).
                        Use relative path to avoid collisions across directories.
+            content: Pre-read file content. If omitted, the file is read from disk.
         """
-        content = filepath.read_text(encoding="utf-8")
+        if content is None:
+            content = filepath.read_text(encoding="utf-8")
         prefix = id_prefix or filepath.stem
 
         chunks: list[dict[str, Any]] = []
