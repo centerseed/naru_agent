@@ -21,7 +21,7 @@
   "dependencies": {
     "ai": "^6.0.116",
     "uuid": "^10.0",
-    "zod": "^3.23"
+    "zod": "^4"
   },
   "devDependencies": {
     "@ai-sdk/google": "^3.0.43",
