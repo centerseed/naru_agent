@@ -181,6 +181,10 @@ class NaruAgent:
         event_bus: Any | None = None,
         prefetch_hooks: list[Callable] | None = None,
         trace_exporters: list[Any] | None = None,
+        # Skills
+        skills: list[Any] | None = None,
+        skill_selector: Any | None = None,
+        max_active_skills: int = 3,
     ) -> None:
         self.model_id = model
         self.api_key = api_key
@@ -248,6 +252,12 @@ class NaruAgent:
             event_bus = EventBus()
         self.event_bus = event_bus
         self.prefetch_hooks = prefetch_hooks or []
+        # Skills
+        self._skill_registry = None
+        if skills:
+            from naru_agent.skills import SkillRegistry, KeywordSkillSelector
+            selector = skill_selector or KeywordSkillSelector()
+            self._skill_registry = SkillRegistry(skills, selector, max_active_skills)
         # TraceCollector — wired only when both event_bus and trace_exporters exist
         self._trace_collector: Any | None = None
         if self.event_bus and self._trace_exporters:
@@ -410,6 +420,22 @@ class NaruAgent:
 
         timings["prefetch"] = time.perf_counter() - t_prefetch
 
+        # === Skill execution ===
+        skill_results: list = []
+        if self._skill_registry:
+            try:
+                from naru_agent.skills.base import SkillContext
+                skill_context = SkillContext(
+                    message=message,
+                    user_id=user_id,
+                    session_id=session_id,
+                    memory_context=memory_context,
+                    knowledge_store=self.knowledge_store,
+                )
+                skill_results = self._skill_registry.run_skills(message, skill_context)
+            except Exception:
+                logger.warning("Skill execution failed", exc_info=True)
+
         # Phase C: Tool calling classification
         tool_calling_result = None
         if self.tool_calling_classifier and intent.needs_tools and self._naru_tools:
@@ -445,6 +471,23 @@ class NaruAgent:
         for hr in hook_results:
             dynamic_instructions.append(hr)
 
+        # === Skill prompt injection ===
+        _system_overridden = False
+        for sr in skill_results:
+            if sr.skipped or not sr.prompt_injection:
+                continue
+            if sr.override_system_prompt is not None:
+                if _system_overridden:
+                    logger.warning("Multiple skills override system prompt; ignoring %s", sr.skill_name)
+                    continue
+                _system_overridden = True
+                if dynamic_instructions:
+                    dynamic_instructions[0] = sr.override_system_prompt
+                else:
+                    dynamic_instructions.insert(0, sr.override_system_prompt)
+            else:
+                dynamic_instructions.append(sr.prompt_injection)
+
         # Inject tool results from classifier into instructions
         if tool_calling_result and tool_calling_result.tool_results:
             results_text = "\n".join(
@@ -470,7 +513,8 @@ class NaruAgent:
         with self._agno_run_lock:
             # 4. Prepare tools (inside lock — keeps tool preparation and agent
             # mutation atomic, preventing fragile split if _prepare_tools evolves)
-            agno_tools = self._prepare_tools(intent.needs_tools)
+            skill_extra_tools = [t for sr in skill_results for t in sr.extra_tools]
+            agno_tools = self._prepare_tools(intent.needs_tools, extra_tools=skill_extra_tools or None)
             if self._agno_agent is None:
                 static_kwargs: dict[str, Any] = {
                     "model": self._get_agno_model(),
@@ -672,7 +716,7 @@ class NaruAgent:
             logger.warning("Knowledge fetch failed")
             return ""
 
-    def _prepare_tools(self, needs_tools: bool) -> list[Any]:
+    def _prepare_tools(self, needs_tools: bool, extra_tools: list[BaseTool] | None = None) -> list[Any]:
         """Convert tools to Agno-compatible format.
 
         always_tools are always appended regardless of needs_tools,
@@ -691,6 +735,9 @@ class NaruAgent:
                     agno_tools.append(t)
             if naru_tools:
                 agno_tools.append(NaruToolkit(naru_tools).toolkit)
+
+        if extra_tools:
+            agno_tools.append(NaruToolkit(extra_tools).toolkit)
 
         if self._always_tools:
             always_naru: list[BaseTool] = []

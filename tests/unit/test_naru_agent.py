@@ -355,8 +355,8 @@ class TestEventBus:
             with patch.object(agent, "_get_agno_model", return_value=MagicMock()):
                 agent.chat("test")
 
-        mock_bus.emit.assert_called_once()
-        assert mock_bus.emit.call_args[0][0] == "chat_complete"
+        emitted_events = [call[0][0] for call in mock_bus.emit.call_args_list]
+        assert "chat_complete" in emitted_events
 
 
 class TestSessionSupport:

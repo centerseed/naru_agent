@@ -39,7 +39,7 @@ def load_baseline() -> dict:
 # ---------------------------------------------------------------------------
 
 def embed_fn(texts: list[str]) -> list[list[float]]:
-    resp = litellm.embedding(model="gemini/text-embedding-004", input=texts)
+    resp = litellm.embedding(model="gemini/gemini-embedding-001", input=texts)
     return [d["embedding"] for d in resp.data]
 
 

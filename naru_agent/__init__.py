@@ -9,6 +9,9 @@ from naru_agent.tracing import (
     JSONLTraceExporter,
 )
 from naru_agent.tools.base import BaseTool, tool
+from naru_agent.skills import BaseSkill, SkillContext, SkillResult
+from naru_agent.skills.base import skill
+from naru_agent.skills.selectors import BaseSkillSelector, KeywordSkillSelector
 from naru_agent.memory.manager import MemoryManager
 from naru_agent.guardrails.base import BaseGuardrail, GuardrailResult
 from naru_agent.events import EventBus
@@ -60,6 +63,9 @@ def __getattr__(name: str):
     if name == "ChunkContextualizer":
         from naru_agent.knowledge.contextualizer import ChunkContextualizer
         return ChunkContextualizer
+    if name == "EmbeddingSkillSelector":
+        from naru_agent.skills.selectors import EmbeddingSkillSelector
+        return EmbeddingSkillSelector
     raise AttributeError(f"module 'naru_agent' has no attribute {name!r}")
 
 
@@ -106,6 +112,13 @@ __all__ = [
     # Session
     "BaseSessionStore",
     "InMemorySessionStore",
+    # Skills
+    "BaseSkill",
+    "SkillContext",
+    "SkillResult",
+    "skill",
+    "BaseSkillSelector",
+    "KeywordSkillSelector",
     # Compression
     "BaseSummaryStore",
     "CompressedSummary",

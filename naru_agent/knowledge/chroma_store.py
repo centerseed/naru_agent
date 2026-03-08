@@ -166,7 +166,7 @@ class ChromaKnowledgeStore(BaseKnowledgeStore):
         if ids is None:
             ids = [str(uuid.uuid4()) for _ in texts]
         if metadatas is None:
-            metadatas = [{} for _ in texts]
+            metadatas = [{"_src": "batch_ingest"} for _ in texts]
 
         final_texts = (
             [contextualizer.contextualize(t, document_context) for t in texts]
