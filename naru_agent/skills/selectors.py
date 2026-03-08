@@ -7,6 +7,7 @@ import threading
 from abc import ABC, abstractmethod
 from typing import Any, Callable
 
+from naru_agent._math import cosine_similarity
 from naru_agent.skills.base import BaseSkill
 
 logger = logging.getLogger(__name__)
@@ -42,15 +43,6 @@ def _skill_to_text(s: BaseSkill) -> str:
     if s.triggers:
         parts.append(" ".join(s.triggers))
     return " | ".join(parts)
-
-
-def _cosine_similarity(a: list[float], b: list[float]) -> float:
-    dot = sum(x * y for x, y in zip(a, b))
-    norm_a = sum(x * x for x in a) ** 0.5
-    norm_b = sum(x * x for x in b) ** 0.5
-    if norm_a == 0 or norm_b == 0:
-        return 0.0
-    return dot / (norm_a * norm_b)
 
 
 def _skills_cache_key(skills: list[BaseSkill]) -> str:
@@ -103,7 +95,7 @@ class EmbeddingSkillSelector(BaseSkillSelector):
 
         scored = []
         for s in candidates:
-            score = _cosine_similarity(query_emb, skill_embeddings[s.name])
+            score = cosine_similarity(query_emb, skill_embeddings[s.name])
             if score >= self.similarity_threshold:
                 scored.append((s, score))
 

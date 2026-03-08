@@ -36,7 +36,7 @@ class SkillRegistry:
         results: list[SkillResult] = []
 
         if len(selected) == 1:
-            # No need for thread pool
+            # Skip thread pool overhead for the common single-skill case
             try:
                 r = selected[0].run(message, context)
                 results.append(r)

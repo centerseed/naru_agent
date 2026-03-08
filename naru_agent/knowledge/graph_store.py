@@ -102,6 +102,10 @@ class GraphKnowledgeStore(BaseKnowledgeStore):
                 sections.append(text)
         return sections if sections else [content]
 
+    @staticmethod
+    def _append_description(existing: str, new: str) -> str:
+        return (existing + " " + new).strip()
+
     def _merge(
         self,
         entities: list[Entity],
@@ -111,11 +115,11 @@ class GraphKnowledgeStore(BaseKnowledgeStore):
         """Merge entities and relations into the graph, deduplicating by name."""
         for e in entities:
             if self._graph.has_node(e.name):
-                existing = self._graph.nodes[e.name]
-                if e.description and e.description not in existing.get("description", ""):
-                    existing["description"] = (
-                        existing.get("description", "") + " " + e.description
-                    ).strip()
+                attrs = self._graph.nodes[e.name]
+                if e.description and e.description not in attrs.get("description", ""):
+                    attrs["description"] = self._append_description(
+                        attrs.get("description", ""), e.description
+                    )
             else:
                 self._graph.add_node(
                     e.name,
@@ -137,9 +141,9 @@ class GraphKnowledgeStore(BaseKnowledgeStore):
             else:
                 edge = self._graph.edges[r.source, r.target]
                 if r.description and r.description not in edge.get("description", ""):
-                    edge["description"] = (
-                        edge.get("description", "") + " " + r.description
-                    ).strip()
+                    edge["description"] = self._append_description(
+                        edge.get("description", ""), r.description
+                    )
         return added
 
     # ------------------------------------------------------------------
@@ -169,8 +173,9 @@ class GraphKnowledgeStore(BaseKnowledgeStore):
             # Last resort: substring match against all query text
             query_lower = query.lower()
             for node in all_nodes:
-                if node in query_lower or any(
-                    w in node for w in query_lower.split() if len(w) > 2
+                node_lower = node.lower()
+                if node_lower in query_lower or any(
+                    w in node_lower for w in query_lower.split() if len(w) > 2
                 ):
                     matched_set.add(node)
 

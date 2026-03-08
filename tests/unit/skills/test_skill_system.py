@@ -147,8 +147,8 @@ def test_get_knowledge_no_store():
 
 def test_get_knowledge_with_store():
     class FakeResult:
-        def __init__(self, content):
-            self.content = content
+        def __init__(self, text):
+            self.text = text
 
     class FakeStore:
         def search(self, query, top_k=3):

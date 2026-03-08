@@ -21,7 +21,7 @@ class SkillContext:
         if not self.knowledge_store:
             return ""
         results = self.knowledge_store.search(query, top_k=top_k)
-        return "\n".join(r.content for r in results)
+        return "\n".join(r.text for r in results)
 
 
 @dataclass

@@ -6,6 +6,7 @@ import logging
 import threading
 from typing import Any, Callable
 
+from naru_agent._math import cosine_similarity
 from naru_agent.tools.base import BaseTool
 
 from .base import BaseToolSelector, ToolSelectionResult
@@ -23,15 +24,6 @@ def _tool_to_text(tool: BaseTool) -> str:
             prop_desc = prop_info.get("description", "")
             parts.append(f"{prop_name} ({prop_type}): {prop_desc}")
     return " | ".join(parts)
-
-
-def _cosine_similarity(a: list[float], b: list[float]) -> float:
-    dot = sum(x * y for x, y in zip(a, b))
-    norm_a = sum(x * x for x in a) ** 0.5
-    norm_b = sum(x * x for x in b) ** 0.5
-    if norm_a == 0 or norm_b == 0:
-        return 0.0
-    return dot / (norm_a * norm_b)
 
 
 def _tools_cache_key(tools: list[BaseTool]) -> str:
@@ -152,7 +144,7 @@ class EmbeddingToolSelector(BaseToolSelector):
 
         scores: dict[str, float] = {}
         for t in tools:
-            scores[t.name] = _cosine_similarity(query_embedding, tool_embeddings[t.name])
+            scores[t.name] = cosine_similarity(query_embedding, tool_embeddings[t.name])
 
         sorted_tools = sorted(tools, key=lambda t: scores[t.name], reverse=True)
 
