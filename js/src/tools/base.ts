@@ -5,6 +5,10 @@ export interface BaseTool<TParams extends z.ZodType = z.ZodType> {
   description: string;
   parameters: TParams;
   execute: (params: z.infer<TParams>) => Promise<string>;
+  /** Execution timeout in milliseconds. */
+  timeout?: number;
+  /** Number of retries on failure (0 = no retry). */
+  retries?: number;
 }
 
 export interface ToolConfig<TParams extends z.ZodType = z.ZodType> {
@@ -12,6 +16,10 @@ export interface ToolConfig<TParams extends z.ZodType = z.ZodType> {
   description: string;
   parameters: TParams;
   execute: (params: z.infer<TParams>) => Promise<string>;
+  /** Execution timeout in milliseconds. */
+  timeout?: number;
+  /** Number of retries on failure (0 = no retry). */
+  retries?: number;
 }
 
 /**
@@ -33,5 +41,7 @@ export function tool<TParams extends z.ZodType>(
     description: config.description,
     parameters: config.parameters,
     execute: config.execute,
+    timeout: config.timeout,
+    retries: config.retries,
   };
 }

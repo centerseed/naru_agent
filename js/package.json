@@ -32,10 +32,22 @@
     "vitest": "^2.0"
   },
   "peerDependencies": {
-    "@ai-sdk/google": "^1.0"
+    "@ai-sdk/google": "^1.0",
+    "@ai-sdk/anthropic": "^1.0",
+    "chromadb": "^1.9",
+    "mem0ai": "^1.0"
   },
   "peerDependenciesMeta": {
     "@ai-sdk/google": {
+      "optional": true
+    },
+    "@ai-sdk/anthropic": {
+      "optional": true
+    },
+    "chromadb": {
+      "optional": true
+    },
+    "mem0ai": {
       "optional": true
     }
   },

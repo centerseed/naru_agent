@@ -30,7 +30,9 @@ export type { BaseSkillSelector } from "./skills/selectors.js";
 
 // Memory
 export type { MemoryItem, MemoryStore } from "./memory/base.js";
-export { MemoryManager } from "./memory/manager.js";
+export { formatMemoryContext } from "./memory/base.js";
+export { MemoryManager, LLMMemoryManager } from "./memory/manager.js";
+export { Mem0MemoryManager } from "./memory/mem0-manager.js";
 export { InMemoryMemoryStore } from "./memory/in-memory-store.js";
 export { PgVectorMemoryStore } from "./memory/pgvector-store.js";
 
@@ -38,6 +40,8 @@ export { PgVectorMemoryStore } from "./memory/pgvector-store.js";
 export type { KnowledgeResult, BaseKnowledgeStore } from "./knowledge/base.js";
 export { formatKnowledgeContext } from "./knowledge/base.js";
 export { InMemoryKnowledgeStore } from "./knowledge/in-memory-store.js";
+export { ChromaKnowledgeStore } from "./knowledge/chroma-store.js";
+export { ChunkContextualizer } from "./knowledge/contextualizer.js";
 export { PgVectorKnowledgeStore } from "./knowledge/pgvector-store.js";
 export { GraphKnowledgeStore } from "./knowledge/graph-store.js";
 export { HybridKnowledgeStore } from "./knowledge/hybrid-store.js";

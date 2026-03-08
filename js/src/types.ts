@@ -73,6 +73,9 @@ export interface NaruAgentConfig {
   skills?: import("./skills/base.js").BaseSkill[];
   skillSelector?: import("./skills/selectors.js").BaseSkillSelector;
   maxActiveSkills?: number;
+
+  // Provider options
+  promptCaching?: boolean;
 }
 
 export interface ChatOptions {

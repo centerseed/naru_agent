@@ -105,193 +105,14 @@ export class NaruAgent {
       }
     }
 
-    // === 2. Parallel Prefetch ===
+    // === 2. Prefetch ===
     const prefetchStart = Date.now();
-    const prefetchTimeout = this.config.prefetchTimeout ?? 10000;
-
-    const prefetchTasks: Record<string, Promise<unknown>> = {};
-
-    // Memory
-    if (this.config.memoryManager && userId) {
-      prefetchTasks.memory = this.config.memoryManager
-        .getContextString(userId, message)
-        .catch(() => "");
-    }
-
-    // Intent classification
-    if (this.config.intentClassifier) {
-      prefetchTasks.intent = this.config.intentClassifier
-        .classify(message)
-        .catch((): IntentResult => ({ needsKnowledge: true, needsTools: true, raw: "YY" }));
-    }
-
-    // Context compression summary
-    if (this.contextCompressor && sessionId) {
-      prefetchTasks.summary = this.contextCompressor
-        .getSummary(sessionId)
-        .catch(() => null);
-    }
-
-    // Custom prefetch hooks
-    if (this.config.prefetchHooks) {
-      for (let i = 0; i < this.config.prefetchHooks.length; i++) {
-        const hook = this.config.prefetchHooks[i];
-        prefetchTasks[`hook_${i}`] = hook(message, userId).catch(() => "");
-      }
-    }
-
-    // Wait for all with timeout
-    const prefetchKeys = Object.keys(prefetchTasks);
-    const prefetchResults = await Promise.allSettled(
-      prefetchKeys.map((key) =>
-        Promise.race([
-          prefetchTasks[key],
-          new Promise((_, reject) =>
-            setTimeout(() => reject(new Error("timeout")), prefetchTimeout),
-          ),
-        ]),
-      ),
-    );
-
-    const prefetchData: Record<string, unknown> = {};
-    for (let i = 0; i < prefetchKeys.length; i++) {
-      const result = prefetchResults[i];
-      prefetchData[prefetchKeys[i]] =
-        result.status === "fulfilled" ? result.value : null;
-    }
-
+    const prefetched = await this.prefetch(message, sessionId, options);
     timings.prefetch = Date.now() - prefetchStart;
 
-    const memoryContext = (prefetchData.memory as string) ?? "";
-    const intent = (prefetchData.intent as IntentResult) ?? null;
-    const summaryData = prefetchData.summary as
-      | { summaryText: string }
-      | null;
+    const { intent, activeTools } = prefetched;
 
-    // Emit events
-    if (memoryContext) this.eventBus.emit("memory_retrieved", { memoryContext });
-    if (intent) this.eventBus.emit("intent_classified", intent);
-
-    // === 3. Conditional Knowledge Retrieval ===
-    let knowledgeContext = "";
-    if (
-      this.config.knowledgeStore &&
-      (intent?.needsKnowledge ?? true)
-    ) {
-      try {
-        const knowledgeStart = Date.now();
-        const results = await this.config.knowledgeStore.search(
-          message,
-          this.config.knowledgeTopK ?? 3,
-        );
-        knowledgeContext = this.config.knowledgeStore.formatContext(
-          results,
-          this.config.knowledgeMinScore ?? 0.3,
-        );
-        timings.knowledge = Date.now() - knowledgeStart;
-        if (knowledgeContext) {
-          this.eventBus.emit("knowledge_retrieved", { knowledgeContext });
-        }
-      } catch {
-        // graceful degradation
-      }
-    }
-
-    // === 4. Skill Execution ===
-    let skillResults: SkillResult[] = [];
-    if (this.skillRegistry) {
-      try {
-        const skillStart = Date.now();
-        const skillContext: SkillContext = {
-          message,
-          userId,
-          sessionId,
-          memoryContext,
-          knowledgeStore: this.config.knowledgeStore,
-        };
-        skillResults = await this.skillRegistry.runSkills(message, skillContext);
-        timings.skills = Date.now() - skillStart;
-      } catch {
-        // graceful degradation
-      }
-    }
-
-    // === 5. Tool Calling Classification ===
-    let toolCallingContext = "";
-    if (
-      this.config.toolCallingClassifier &&
-      this.config.tools?.length
-    ) {
-      try {
-        const tcStart = Date.now();
-        const tcResult = await this.config.toolCallingClassifier.classify(
-          message,
-          this.config.tools,
-        );
-        if (tcResult.toolResults.length > 0) {
-          toolCallingContext = tcResult.toolResults
-            .map((r) => `[${r.tool}]: ${r.result}`)
-            .join("\n");
-          this.eventBus.emit("tool_calling_classified", tcResult);
-        }
-        timings.toolCalling = Date.now() - tcStart;
-      } catch {
-        // graceful degradation
-      }
-    }
-
-    // === 6. Build Dynamic Instructions ===
-    const dynamicInstructions: string[] = [...this.instructions];
-
-    if (summaryData?.summaryText) {
-      dynamicInstructions.push(
-        `【Conversation History Summary】\n${summaryData.summaryText}`,
-      );
-    }
-    if (knowledgeContext) {
-      dynamicInstructions.push(
-        `【Reference Knowledge】\n${knowledgeContext}`,
-      );
-    }
-    if (memoryContext) {
-      dynamicInstructions.push(memoryContext);
-    }
-
-    // Hook results
-    for (const key of prefetchKeys) {
-      if (key.startsWith("hook_") && prefetchData[key]) {
-        dynamicInstructions.push(prefetchData[key] as string);
-      }
-    }
-
-    // Skill results
-    let overridePrompt: string | null = null;
-    for (const sr of skillResults) {
-      if (sr.overrideSystemPrompt) {
-        overridePrompt = sr.overrideSystemPrompt;
-      }
-      if (sr.promptInjection) {
-        dynamicInstructions.push(sr.promptInjection);
-      }
-    }
-
-    if (toolCallingContext) {
-      dynamicInstructions.push(
-        `【Tool Results】\n${toolCallingContext}`,
-      );
-    }
-
-    // === 7. Prepare Tools ===
-    const activeTools: BaseTool[] = [];
-    if (intent?.needsTools ?? true) {
-      if (this.config.tools) activeTools.push(...this.config.tools);
-    }
-    if (this.config.alwaysTools) activeTools.push(...this.config.alwaysTools);
-    for (const sr of skillResults) {
-      activeTools.push(...sr.extraTools);
-    }
-
-    // === 8. Load Session History ===
+    // === 3. Load Session History ===
     let history: ModelMessage[] = [];
     if (this.config.sessionStore && sessionId) {
       const stored = await this.config.sessionStore.get(sessionId);
@@ -301,12 +122,10 @@ export class NaruAgent {
       }
     }
 
-    // === 9. LLM Call ===
+    // === 4. LLM Call ===
     this.eventBus.emit("before_llm_call");
     const llmStart = Date.now();
 
-    const systemPrompt =
-      overridePrompt ?? dynamicInstructions.join("\n\n");
     const vercelTools =
       activeTools.length > 0 ? toVercelTools(activeTools) : undefined;
 
@@ -321,7 +140,7 @@ export class NaruAgent {
     try {
       const result = await generateText({
         model: this.model,
-        system: systemPrompt,
+        system: prefetched.systemPrompt,
         messages: [
           ...history,
           { role: "user" as const, content: message },
@@ -329,6 +148,9 @@ export class NaruAgent {
         tools: vercelTools,
         stopWhen: stepCountIs(this.config.toolCallLimit ?? 10),
         temperature: this.config.temperature ?? 0.7,
+        providerOptions: this.config.promptCaching ? {
+          anthropic: { cacheControl: true },
+        } : undefined,
       });
 
       content = result.text || "";
@@ -354,7 +176,7 @@ export class NaruAgent {
     timings.llm = Date.now() - llmStart;
     this.eventBus.emit("after_llm_call");
 
-    // === 10. Output Guardrails ===
+    // === 5. Output Guardrails ===
     if (this.config.guardrails && content) {
       for (const guardrail of this.config.guardrails) {
         const result = await guardrail.checkOutput(content);
@@ -364,7 +186,7 @@ export class NaruAgent {
       }
     }
 
-    // === 11. Build Result ===
+    // === 6. Build Result ===
     timings.total = Date.now() - startTime;
 
     const naruResult = this.makeResult({
@@ -378,7 +200,7 @@ export class NaruAgent {
       traceId: traceId ?? null,
     });
 
-    // === 12. Background Tasks ===
+    // === 7. Background Tasks ===
     const updatedHistory: ModelMessage[] = [
       ...history,
       { role: "user" as const, content: message },
@@ -419,6 +241,200 @@ export class NaruAgent {
   }
 
   /**
+   * Shared prefetch logic for chat() and chatStream().
+   */
+  private async prefetch(
+    message: string,
+    sessionId: string,
+    options?: ChatOptions,
+  ) {
+    const userId = options?.userId;
+    const prefetchTimeout = this.config.prefetchTimeout ?? 10000;
+
+    // === Parallel Prefetch ===
+    const prefetchTasks: Record<string, Promise<unknown>> = {};
+
+    if (this.config.memoryManager && userId) {
+      prefetchTasks.memory = this.config.memoryManager
+        .getContextString(userId, message)
+        .catch(() => "");
+    }
+
+    if (this.config.intentClassifier) {
+      prefetchTasks.intent = this.config.intentClassifier
+        .classify(message)
+        .catch((): IntentResult => ({ needsKnowledge: true, needsTools: true, raw: "YY" }));
+    }
+
+    if (this.contextCompressor && sessionId) {
+      prefetchTasks.summary = this.contextCompressor
+        .getSummary(sessionId)
+        .catch(() => null);
+    }
+
+    if (this.config.prefetchHooks) {
+      for (let i = 0; i < this.config.prefetchHooks.length; i++) {
+        const hook = this.config.prefetchHooks[i];
+        prefetchTasks[`hook_${i}`] = hook(message, userId).catch(() => "");
+      }
+    }
+
+    const prefetchKeys = Object.keys(prefetchTasks);
+    const prefetchResults = await Promise.allSettled(
+      prefetchKeys.map((key) =>
+        Promise.race([
+          prefetchTasks[key],
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error("timeout")), prefetchTimeout),
+          ),
+        ]),
+      ),
+    );
+
+    const prefetchData: Record<string, unknown> = {};
+    for (let i = 0; i < prefetchKeys.length; i++) {
+      const result = prefetchResults[i];
+      prefetchData[prefetchKeys[i]] =
+        result.status === "fulfilled" ? result.value : null;
+    }
+
+    const memoryContext = (prefetchData.memory as string) ?? "";
+    const intent = (prefetchData.intent as IntentResult) ?? null;
+    const summaryData = prefetchData.summary as
+      | { summaryText: string }
+      | null;
+
+    if (memoryContext) this.eventBus.emit("memory_retrieved", { memoryContext });
+    if (intent) this.eventBus.emit("intent_classified", intent);
+
+    // === Knowledge Retrieval ===
+    let knowledgeContext = "";
+    if (
+      this.config.knowledgeStore &&
+      (intent?.needsKnowledge ?? true)
+    ) {
+      try {
+        const results = await this.config.knowledgeStore.search(
+          message,
+          this.config.knowledgeTopK ?? 3,
+        );
+        knowledgeContext = this.config.knowledgeStore.formatContext(
+          results,
+          this.config.knowledgeMinScore ?? 0.3,
+        );
+        if (knowledgeContext) {
+          this.eventBus.emit("knowledge_retrieved", { knowledgeContext });
+        }
+      } catch {
+        // graceful degradation
+      }
+    }
+
+    // === Skill Execution ===
+    let skillResults: SkillResult[] = [];
+    if (this.skillRegistry) {
+      try {
+        const skillContext: SkillContext = {
+          message,
+          userId,
+          sessionId,
+          memoryContext,
+          knowledgeStore: this.config.knowledgeStore,
+        };
+        skillResults = await this.skillRegistry.runSkills(message, skillContext);
+      } catch {
+        // graceful degradation
+      }
+    }
+
+    // === Tool Calling Classification ===
+    let toolCallingContext = "";
+    if (
+      this.config.toolCallingClassifier &&
+      this.config.tools?.length
+    ) {
+      try {
+        const tcResult = await this.config.toolCallingClassifier.classify(
+          message,
+          this.config.tools,
+        );
+        if (tcResult.toolResults.length > 0) {
+          toolCallingContext = tcResult.toolResults
+            .map((r) => `[${r.tool}]: ${r.result}`)
+            .join("\n");
+          this.eventBus.emit("tool_calling_classified", tcResult);
+        }
+      } catch {
+        // graceful degradation
+      }
+    }
+
+    // === Build Dynamic Instructions ===
+    const dynamicInstructions: string[] = [...this.instructions];
+
+    if (summaryData?.summaryText) {
+      dynamicInstructions.push(
+        `【Conversation History Summary】\n${summaryData.summaryText}`,
+      );
+    }
+    if (knowledgeContext) {
+      dynamicInstructions.push(
+        `【Reference Knowledge】\n${knowledgeContext}`,
+      );
+    }
+    if (memoryContext) {
+      dynamicInstructions.push(memoryContext);
+    }
+
+    for (const key of prefetchKeys) {
+      if (key.startsWith("hook_") && prefetchData[key]) {
+        dynamicInstructions.push(prefetchData[key] as string);
+      }
+    }
+
+    let overridePrompt: string | null = null;
+    for (const sr of skillResults) {
+      if (sr.overrideSystemPrompt) {
+        overridePrompt = sr.overrideSystemPrompt;
+      }
+      if (sr.promptInjection) {
+        dynamicInstructions.push(sr.promptInjection);
+      }
+    }
+
+    if (toolCallingContext) {
+      dynamicInstructions.push(
+        `【Tool Results】\n${toolCallingContext}`,
+      );
+    }
+
+    // === Prepare Tools ===
+    const activeTools: BaseTool[] = [];
+    if (intent?.needsTools ?? true) {
+      if (this.config.tools) activeTools.push(...this.config.tools);
+    }
+    if (this.config.alwaysTools) activeTools.push(...this.config.alwaysTools);
+    for (const sr of skillResults) {
+      activeTools.push(...sr.extraTools);
+    }
+
+    const systemPrompt =
+      overridePrompt ?? dynamicInstructions.join("\n\n");
+
+    return {
+      memoryContext,
+      intent,
+      summaryData,
+      knowledgeContext,
+      skillResults,
+      toolCallingContext,
+      dynamicInstructions,
+      activeTools,
+      systemPrompt,
+    };
+  }
+
+  /**
    * Streaming chat — returns an async iterable of text stream parts.
    */
   async *chatStream(
@@ -428,26 +444,38 @@ export class NaruAgent {
     const sessionId = options?.sessionId ?? uuidv4();
     const userId = options?.userId;
 
-    // Simplified streaming: skip prefetch for now, just stream LLM
-    const systemPrompt = this.instructions.join("\n\n");
+    // === Input Guardrails ===
+    if (this.config.guardrails) {
+      for (const guardrail of this.config.guardrails) {
+        const result = await guardrail.checkInput(message);
+        if (!result.passed) {
+          yield { type: "text-delta", text: result.reason ?? "Blocked." } as TextStreamPart<ToolSet>;
+          return;
+        }
+      }
+    }
+
+    // === Prefetch ===
+    const prefetched = await this.prefetch(message, sessionId, options);
 
     // Load history
     let history: ModelMessage[] = [];
     if (this.config.sessionStore && sessionId) {
       const stored = await this.config.sessionStore.get(sessionId);
-      if (stored) history = stored;
+      if (stored) {
+        const limit = this.config.numHistoryMessages;
+        history = limit ? stored.slice(-limit) : stored;
+      }
     }
 
-    const activeTools: BaseTool[] = [
-      ...(this.config.tools ?? []),
-      ...(this.config.alwaysTools ?? []),
-    ];
     const vercelTools =
-      activeTools.length > 0 ? toVercelTools(activeTools) : undefined;
+      prefetched.activeTools.length > 0
+        ? toVercelTools(prefetched.activeTools)
+        : undefined;
 
     const result = streamText({
       model: this.model,
-      system: systemPrompt,
+      system: prefetched.systemPrompt,
       messages: [
         ...history,
         { role: "user" as const, content: message },
@@ -455,6 +483,9 @@ export class NaruAgent {
       tools: vercelTools,
       stopWhen: stepCountIs(this.config.toolCallLimit ?? 10),
       temperature: this.config.temperature ?? 0.7,
+      providerOptions: this.config.promptCaching ? {
+        anthropic: { cacheControl: true },
+      } : undefined,
     });
 
     let fullContent = "";
@@ -465,14 +496,30 @@ export class NaruAgent {
       yield part as TextStreamPart<ToolSet>;
     }
 
-    // Background: save session
+    // === Background: save session, memory, compression ===
+    const updatedHistory: ModelMessage[] = [
+      ...history,
+      { role: "user" as const, content: message },
+      { role: "assistant" as const, content: fullContent },
+    ];
+
     if (this.config.sessionStore && sessionId) {
-      const updatedHistory: ModelMessage[] = [
-        ...history,
-        { role: "user" as const, content: message },
-        { role: "assistant" as const, content: fullContent },
-      ];
       this.config.sessionStore.save(sessionId, updatedHistory).catch(() => {});
+    }
+
+    if (this.config.memoryManager && userId) {
+      this.config.memoryManager
+        .add(userId, [
+          { role: "user", content: message },
+          { role: "assistant", content: fullContent },
+        ])
+        .catch(() => {});
+    }
+
+    if (this.contextCompressor && sessionId) {
+      this.contextCompressor
+        .maybeCompress(sessionId, updatedHistory)
+        .catch(() => {});
     }
   }
 

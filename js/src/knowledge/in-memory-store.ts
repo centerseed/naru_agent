@@ -12,6 +12,8 @@ interface StoredDoc {
 /**
  * In-memory vector knowledge store for development and testing.
  * Uses cosine similarity for search — no external dependencies.
+ *
+ * @deprecated Use {@link ChromaKnowledgeStore} for production workloads.
  */
 export class InMemoryKnowledgeStore implements BaseKnowledgeStore {
   private docs: StoredDoc[] = [];

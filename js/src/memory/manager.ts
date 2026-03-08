@@ -1,7 +1,7 @@
 import { generateObject, type LanguageModel } from "ai";
 import { z } from "zod";
 import { v4 as uuidv4 } from "uuid";
-import type { MemoryItem, MemoryStore } from "./base.js";
+import { formatMemoryContext, type MemoryItem, type MemoryStore } from "./base.js";
 import type { EmbedFn } from "../types.js";
 
 const FactExtractionSchema = z.object({
@@ -19,6 +19,9 @@ const ReconciliationActionSchema = z.object({
   ),
 });
 
+/**
+ * @deprecated Use Mem0MemoryManager for production.
+ */
 export class MemoryManager {
   private model: LanguageModel;
   private store: MemoryStore;
@@ -151,10 +154,8 @@ export class MemoryManager {
     topK = 5,
   ): Promise<string> {
     const memories = await this.search(userId, query, topK);
-    if (memories.length === 0) return "";
-    return (
-      "User memories:\n" +
-      memories.map((m) => `- ${m.content}`).join("\n")
-    );
+    return formatMemoryContext(memories);
   }
 }
+
+export { MemoryManager as LLMMemoryManager };

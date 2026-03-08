@@ -325,7 +325,8 @@ describeIf("MultiTurnCoherence", () => {
     const result = await agent.chat("第一個多少錢？", { sessionId: sid });
 
     expect(result.blocked).toBe(false);
-    expect(result.content).toContain("8990");
+    // Accept both "8990" and "8,990" (comma-formatted price)
+    expect(result.content.replace(/,/g, "")).toContain("8990");
   }, 60_000);
 
   it("maintains topic continuity (改成 3 個)", async () => {
