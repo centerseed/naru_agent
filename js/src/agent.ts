@@ -6,6 +6,7 @@ import {
   type ModelMessage,
   type TextStreamPart,
   type ToolSet,
+  type ToolChoice,
 } from "ai";
 import { v4 as uuidv4 } from "uuid";
 import type {
@@ -128,6 +129,16 @@ export class NaruAgent {
 
     const vercelTools =
       activeTools.length > 0 ? toVercelTools(activeTools) : undefined;
+    const toolChoice =
+      activeTools.length > 0
+        ? this.resolveToolChoice({
+            message,
+            userId,
+            sessionId,
+            intent,
+            activeTools,
+          })
+        : undefined;
 
     let content = "";
     const toolCallNames: string[] = [];
@@ -146,6 +157,7 @@ export class NaruAgent {
           { role: "user" as const, content: message },
         ],
         tools: vercelTools,
+        toolChoice,
         stopWhen: stepCountIs(this.config.toolCallLimit ?? 10),
         temperature: this.config.temperature ?? 0.7,
         providerOptions: this.config.promptCaching ? {
@@ -170,6 +182,7 @@ export class NaruAgent {
           (result.usage?.outputTokens ?? 0)),
       };
     } catch (err) {
+      console.error("[NaruAgent] generateText failed:", err);
       content = FALLBACK_RESPONSE;
     }
 
@@ -351,12 +364,12 @@ export class NaruAgent {
     let toolCallingContext = "";
     if (
       this.config.toolCallingClassifier &&
-      this.config.tools?.length
+      this.getClassifierTools().length > 0
     ) {
       try {
         const tcResult = await this.config.toolCallingClassifier.classify(
           message,
-          this.config.tools,
+          this.getClassifierTools(),
         );
         if (tcResult.toolResults.length > 0) {
           toolCallingContext = tcResult.toolResults
@@ -472,6 +485,16 @@ export class NaruAgent {
       prefetched.activeTools.length > 0
         ? toVercelTools(prefetched.activeTools)
         : undefined;
+    const toolChoice =
+      prefetched.activeTools.length > 0
+        ? this.resolveToolChoice({
+            message,
+            userId,
+            sessionId,
+            intent: prefetched.intent,
+            activeTools: prefetched.activeTools,
+          })
+        : undefined;
 
     const result = streamText({
       model: this.model,
@@ -481,6 +504,7 @@ export class NaruAgent {
         { role: "user" as const, content: message },
       ],
       tools: vercelTools,
+      toolChoice,
       stopWhen: stepCountIs(this.config.toolCallLimit ?? 10),
       temperature: this.config.temperature ?? 0.7,
       providerOptions: this.config.promptCaching ? {
@@ -546,4 +570,30 @@ export class NaruAgent {
       ...partial,
     };
   }
+
+  private resolveToolChoice(context: {
+    message: string;
+    userId?: string;
+    sessionId?: string;
+    intent: IntentResult | null;
+    activeTools: BaseTool[];
+  }): ToolChoice<Record<string, unknown>> | undefined {
+    return this.config.toolChoiceResolver?.(context) ?? this.config.toolChoice;
+  }
+
+  private getClassifierTools(): BaseTool[] {
+    const tools: BaseTool[] = [];
+    if (this.config.tools) tools.push(...this.config.tools);
+    if (this.config.alwaysTools) tools.push(...this.config.alwaysTools);
+    return dedupeToolsByName(tools);
+  }
+}
+
+function dedupeToolsByName(tools: BaseTool[]): BaseTool[] {
+  const seen = new Set<string>();
+  return tools.filter((tool) => {
+    if (seen.has(tool.name)) return false;
+    seen.add(tool.name);
+    return true;
+  });
 }

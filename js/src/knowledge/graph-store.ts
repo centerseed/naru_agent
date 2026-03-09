@@ -26,7 +26,8 @@ type GraphLib = typeof import("graphology");
  * Knowledge graph store using graphology. Requires `graphology` as optional dependency.
  */
 export class GraphKnowledgeStore implements BaseKnowledgeStore {
-  private graph: InstanceType<GraphLib["default"]> | null = null;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private graph: any | null = null;
   private model: LanguageModel;
   private graphLib: GraphLib | null = null;
 
@@ -34,7 +35,8 @@ export class GraphKnowledgeStore implements BaseKnowledgeStore {
     this.model = config.model;
   }
 
-  private async ensureGraph(): Promise<InstanceType<GraphLib["default"]>> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private async ensureGraph(): Promise<any> {
     if (this.graph) return this.graph;
     const graphology = await import("graphology");
     this.graphLib = graphology;

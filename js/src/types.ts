@@ -1,4 +1,5 @@
-import type { LanguageModel, ModelMessage } from "ai";
+import type { LanguageModel, ModelMessage, ToolChoice } from "ai";
+import type { BaseTool } from "./tools/base.js";
 
 export interface TokenUsage {
   promptTokens: number;
@@ -52,6 +53,14 @@ export interface NaruAgentConfig {
   toolCallLimit?: number;
   temperature?: number;
   prefetchTimeout?: number;
+  toolChoice?: ToolChoice<Record<string, unknown>>;
+  toolChoiceResolver?: (context: {
+    message: string;
+    userId?: string;
+    sessionId?: string;
+    intent: IntentResult | null;
+    activeTools: BaseTool[];
+  }) => ToolChoice<Record<string, unknown>> | undefined;
 
   // Session
   sessionStore?: import("./session/base.js").BaseSessionStore;

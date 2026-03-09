@@ -115,4 +115,48 @@ describe("NaruAgent", () => {
     const result = await agent.chat("What is 6*7?");
     expect(result.content).toBe("The answer is 42");
   });
+
+  it("passes configured toolChoice to the model call", async () => {
+    let observedToolChoice: unknown;
+    const model: LanguageModel = {
+      specificationVersion: "v2",
+      provider: "test",
+      modelId: "test-model",
+      supportedUrls: {},
+      doGenerate: async (options: unknown) => {
+        observedToolChoice = (options as { toolChoice?: unknown }).toolChoice;
+        return {
+          content: [{ type: "text" as const, text: "done" }],
+          finishReason: "stop" as const,
+          usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+          warnings: [],
+          response: {
+            id: "test",
+            timestamp: new Date(),
+            modelId: "test-model",
+          },
+        };
+      },
+      doStream: async () => ({
+        stream: new ReadableStream(),
+        warnings: [],
+      }),
+    } as unknown as LanguageModel;
+
+    const testTool = tool({
+      name: "calculator",
+      description: "Calculate math",
+      parameters: z.object({ expr: z.string() }),
+      execute: async ({ expr }) => `Result: ${expr}`,
+    });
+
+    const agent = new NaruAgent({
+      model,
+      tools: [testTool],
+      toolChoice: "required",
+    });
+
+    await agent.chat("What is 6*7?");
+    expect(observedToolChoice).toEqual({ type: "required" });
+  });
 });
