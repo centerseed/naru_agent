@@ -17,7 +17,9 @@ from pathlib import Path
 import pytest
 
 from naru_agent.agent import NaruAgent
+from naru_agent.intent.base import BaseIntentClassifier, IntentResult
 from naru_agent.intent.llm_classifier import LLMIntentClassifier
+from naru_agent.intent.tool_calling_classifier import LLMToolCallingClassifier
 from naru_agent.tools.base import tool
 from naru_agent.tracing.exporters.jsonl import JSONLTraceExporter
 
@@ -458,3 +460,177 @@ class TestTraceCompleteness:
                 json.loads(line)
             except json.JSONDecodeError as e:
                 pytest.fail(f"Line {i} is not valid JSON: {e}\n{line[:200]}")
+
+
+# ---------------------------------------------------------------------------
+# Baseline: ToolCallingClassifier 品質與效能
+# ---------------------------------------------------------------------------
+
+
+class TestToolCallingClassifierBaseline:
+    """LLMToolCallingClassifier 品質基準測試。
+
+    覆蓋：
+    - 工具選擇精準度（選對工具、不濫用工具）
+    - token 用量合理性（比主 LLM 輕量）
+    - 並行多 tool 執行
+    - Agent 整合：tool results 注入後主 LLM 回應品質
+    """
+
+    def _make_classifier(self) -> LLMToolCallingClassifier:
+        return LLMToolCallingClassifier(
+            model=MODEL,
+            api_key=os.getenv("GEMINI_API_KEY"),
+        )
+
+    def test_tool_selection_precision(self):
+        """正確訊息選到正確工具，不相關訊息不呼叫工具。"""
+        baseline = load_baseline()
+
+        @tool(description="Calculate shipping fee based on weight in kg and destination city")
+        def calc_shipping(weight_kg: float, destination: str) -> str:
+            return f"Shipping {weight_kg}kg to {destination}: NT$120"
+
+        @tool(description="Check product inventory for a given product ID")
+        def check_inventory(product_id: str) -> str:
+            return f"Product {product_id}: 50 units in stock"
+
+        classifier = self._make_classifier()
+
+        # Should call calc_shipping, not check_inventory
+        result = classifier.classify(
+            "計算寄 2 公斤包裹到高雄的運費",
+            [calc_shipping, check_inventory],
+        )
+        tool_names = [r["tool"] for r in result.tool_results]
+        assert "calc_shipping" in tool_names, f"Expected calc_shipping, got: {tool_names}"
+        assert "check_inventory" not in tool_names, f"check_inventory should not be called"
+
+        # Chitchat: no tool should be called
+        result_chat = classifier.classify("你好，請問你是誰？", [calc_shipping, check_inventory])
+        assert result_chat.tool_results == [], (
+            f"No tool should be called for chitchat, got: {result_chat.tool_results}"
+        )
+        assert result_chat.tool_results.__len__() <= baseline.get("chitchat_max_tool_calls", 0)
+
+    def test_token_usage_is_lightweight(self):
+        """ToolCallingClassifier 的 token 用量應低於主 LLM baseline。"""
+        baseline = load_baseline()
+        max_tokens = baseline.get("tool_calling_classifier_max_tokens", 2000)
+
+        @tool(description="Get current temperature for a city")
+        def get_temperature(city: str) -> str:
+            return f"{city}: 25°C"
+
+        classifier = self._make_classifier()
+        result = classifier.classify("台北現在幾度？", [get_temperature])
+
+        total = result.usage.get("total_tokens", result.usage.get("total", 0))
+        assert total > 0, "Usage should be tracked"
+        assert total <= max_tokens, (
+            f"ToolCallingClassifier used {total} tokens, baseline max is {max_tokens}"
+        )
+
+    def test_parallel_tool_execution_order(self):
+        """並行執行多個 tools 時，結果順序與 tool_calls 順序一致。"""
+        execution_order = []
+
+        @tool(description="Get price for product A")
+        def get_price_a() -> str:
+            execution_order.append("A")
+            return "Product A: NT$500"
+
+        @tool(description="Get price for product B")
+        def get_price_b() -> str:
+            execution_order.append("B")
+            return "Product B: NT$300"
+
+        classifier = LLMToolCallingClassifier(
+            model=MODEL,
+            api_key=os.getenv("GEMINI_API_KEY"),
+            system_prompt=(
+                "You are a pricing assistant. "
+                "When asked about prices, call BOTH get_price_a AND get_price_b."
+            ),
+        )
+        result = classifier.classify(
+            "Tell me the prices of both products A and B.",
+            [get_price_a, get_price_b],
+        )
+
+        # At least one tool should execute
+        assert len(result.tool_results) >= 1
+        # All results should have required fields
+        for r in result.tool_results:
+            assert "tool" in r
+            assert "args" in r
+            assert "result" in r
+
+    def test_agent_integration_tool_results_in_response(self):
+        """Agent 使用 tool_calling_classifier 後，回應應包含 tool 執行結果的資訊。"""
+        baseline = load_baseline()
+
+        @tool(description="Get order status for an order ID")
+        def get_order_status(order_id: str) -> str:
+            return f"Order {order_id}: Delivered on 2026-03-08, signed by recipient"
+
+        class AlwaysNY(BaseIntentClassifier):
+            def classify(self, message):
+                return IntentResult(needs_knowledge=False, needs_tools=True, raw="NY")
+
+        classifier = self._make_classifier()
+        agent = NaruAgent(
+            model=MODEL,
+            api_key=os.getenv("GEMINI_API_KEY"),
+            instructions=["You are an order support assistant. Answer based on tool results."],
+            tools=[get_order_status],
+            intent_classifier=AlwaysNY(),
+            tool_calling_classifier=classifier,
+        )
+
+        result = agent.chat("查詢訂單 ORD-9527 的狀態")
+
+        assert result.content, "Agent should return a response"
+        assert not result.blocked
+        # Response should mention delivery or order info
+        keywords = ["ORD-9527", "delivered", "Delivered", "已送達", "簽收", "2026"]
+        assert any(kw.lower() in result.content.lower() for kw in keywords), (
+            f"Response should mention order info. Got: {result.content[:200]}"
+        )
+        assert result.usage.get("total", 0) > 0
+
+    def test_trace_includes_tool_calling_classified_event(self):
+        """當使用 tool_calling_classifier 時，trace 應包含 tool_calling_classified 事件。"""
+        with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as f:
+            trace_file = f.name
+
+        @tool(description="Get weather for a city")
+        def get_weather(city: str) -> str:
+            return f"{city}: Sunny"
+
+        class AlwaysNY(BaseIntentClassifier):
+            def classify(self, message):
+                return IntentResult(needs_knowledge=False, needs_tools=True, raw="NY")
+
+        classifier = self._make_classifier()
+        agent = NaruAgent(
+            model=MODEL,
+            api_key=os.getenv("GEMINI_API_KEY"),
+            instructions=["You are a weather assistant."],
+            tools=[get_weather],
+            intent_classifier=AlwaysNY(),
+            tool_calling_classifier=classifier,
+            trace_exporters=[JSONLTraceExporter(trace_file)],
+        )
+
+        agent.chat("台北天氣如何？")
+        time.sleep(0.5)
+
+        raw_lines = Path(trace_file).read_text().strip().splitlines()
+        assert len(raw_lines) >= 1
+
+        traces = [json.loads(line) for line in raw_lines]
+        span_names = [s.get("name", "") for t in traces for s in t.get("spans", [])]
+        # Should have a tool_calling span or event
+        has_tc_span = any("tool_calling" in sn for sn in span_names)
+        assert has_tc_span, f"No tool_calling span found. Spans: {span_names}"

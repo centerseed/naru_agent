@@ -9,5 +9,6 @@
   "graph_min_relations": 4,
   "memory_min_extracted_facts": 2,
   "compression_retention_min_ratio": 0.66,
-  "chitchat_max_tool_calls": 0
+  "chitchat_max_tool_calls": 0,
+  "tool_calling_classifier_max_tokens": 2000
 }

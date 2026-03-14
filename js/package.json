@@ -1,6 +1,6 @@
 {
   "name": "naru-agent-js",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Lightweight TypeScript Agent framework with memory, RAG, skills, and guardrails",
   "type": "module",
   "main": "./dist/index.js",

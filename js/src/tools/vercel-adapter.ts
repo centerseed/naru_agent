@@ -51,3 +51,21 @@ export function toVercelTools(
   }
   return result as ToolSet;
 }
+
+/**
+ * Same as toVercelTools but with a no-op execute.
+ * Useful for tool planning where you need LLM tool selection
+ * without actually executing tools.
+ */
+export function toVercelToolsNoop(tools: BaseTool[]): ToolSet {
+  const result: Record<string, unknown> = {};
+  for (const t of tools) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    result[t.name] = (vercelTool as any)({
+      description: t.description,
+      parameters: t.parameters,
+      execute: async () => "",
+    });
+  }
+  return result as ToolSet;
+}

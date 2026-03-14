@@ -16,6 +16,14 @@ import type {
   TokenUsage,
   IntentResult,
 } from "./types.js";
+import { normalizeUsage } from "./types.js";
+import type {
+  StructuredClassifier,
+  DecisionAgentResult,
+  DecisionOptions,
+} from "./decision/types.js";
+import { DecisionError } from "./decision/types.js";
+import { ToolPlanner } from "./decision/tool-planner.js";
 import { EventBus } from "./event-bus.js";
 import { toVercelTools } from "./tools/vercel-adapter.js";
 import type { BaseTool } from "./tools/base.js";
@@ -174,13 +182,7 @@ export class NaruAgent {
         }
       }
 
-      usage = {
-        promptTokens: result.usage?.inputTokens ?? 0,
-        completionTokens: result.usage?.outputTokens ?? 0,
-        totalTokens: result.usage?.totalTokens ??
-          ((result.usage?.inputTokens ?? 0) +
-          (result.usage?.outputTokens ?? 0)),
-      };
+      usage = normalizeUsage(result.usage);
     } catch (err) {
       console.error("[NaruAgent] generateText failed:", err);
       content = FALLBACK_RESPONSE;
@@ -260,6 +262,7 @@ export class NaruAgent {
     message: string,
     sessionId: string,
     options?: ChatOptions,
+    skip?: { intent?: boolean; skills?: boolean; toolCalling?: boolean },
   ) {
     const userId = options?.userId;
     const prefetchTimeout = this.config.prefetchTimeout ?? 10000;
@@ -273,7 +276,7 @@ export class NaruAgent {
         .catch(() => "");
     }
 
-    if (this.config.intentClassifier) {
+    if (this.config.intentClassifier && !skip?.intent) {
       prefetchTasks.intent = this.config.intentClassifier
         .classify(message)
         .catch((): IntentResult => ({ needsKnowledge: true, needsTools: true, raw: "YY" }));
@@ -345,7 +348,7 @@ export class NaruAgent {
 
     // === Skill Execution ===
     let skillResults: SkillResult[] = [];
-    if (this.skillRegistry) {
+    if (this.skillRegistry && !skip?.skills) {
       try {
         const skillContext: SkillContext = {
           message,
@@ -364,6 +367,7 @@ export class NaruAgent {
     let toolCallingContext = "";
     if (
       this.config.toolCallingClassifier &&
+      !skip?.toolCalling &&
       this.getClassifierTools().length > 0
     ) {
       try {
@@ -545,6 +549,133 @@ export class NaruAgent {
         .maybeCompress(sessionId, updatedHistory)
         .catch(() => {});
     }
+  }
+
+  /**
+   * Structured decision mode — uses full prefetch context (memory, summary,
+   * knowledge, hooks) but returns a typed JSON decision instead of generating
+   * a natural-language response or executing tools.
+   */
+  async decide<T>(
+    message: string,
+    classifier: StructuredClassifier<T>,
+    options?: DecisionOptions,
+  ): Promise<DecisionAgentResult<T>> {
+    const startTime = Date.now();
+    const userId = options?.userId;
+    const sessionId = options?.sessionId ?? uuidv4();
+    const timings: Record<string, number> = {};
+
+    // Start trace
+    const traceId = this.traceCollector?.startTrace(message, userId, sessionId) ?? null;
+
+    // === 1. Input Guardrails ===
+    if (this.config.guardrails) {
+      for (const guardrail of this.config.guardrails) {
+        const result = await guardrail.checkInput(message);
+        if (!result.passed) {
+          throw new DecisionError(
+            result.reason ?? "Blocked by input guardrail.",
+          );
+        }
+      }
+    }
+
+    // === 2. Prefetch (skip intent/skills/toolCalling — not needed for decide) ===
+    const prefetchStart = Date.now();
+    const prefetched = await this.prefetch(message, sessionId, { userId }, {
+      intent: true,
+      skills: true,
+      toolCalling: true,
+    });
+    timings.prefetch = Date.now() - prefetchStart;
+
+    // === 3. Assemble StructuredClassifierInput ===
+    // Only pass hook-injected instructions as extraContext to avoid
+    // double-injecting summary/memory/knowledge (already in dedicated fields).
+    const hookInstructions = this.instructions.length > 0
+      ? [...this.instructions]
+      : [];
+    for (const di of prefetched.dynamicInstructions) {
+      // Skip items already covered by dedicated fields
+      if (di === prefetched.memoryContext) continue;
+      if (prefetched.summaryData?.summaryText && di.includes(prefetched.summaryData.summaryText)) continue;
+      if (prefetched.knowledgeContext && di.includes(prefetched.knowledgeContext)) continue;
+      if (!hookInstructions.includes(di)) hookInstructions.push(di);
+    }
+
+    const classifierInput = {
+      message,
+      sessionId,
+      userId,
+      summary: prefetched.summaryData?.summaryText ?? null,
+      memoryContext: prefetched.memoryContext || undefined,
+      knowledgeContext: prefetched.knowledgeContext || undefined,
+      extraContext: hookInstructions.length > 0 ? hookInstructions : undefined,
+    };
+
+    // === 4. Classify + Optional Tool Planning (parallel) ===
+    const classifyStart = Date.now();
+
+    const classifyPromise = classifier.classify(classifierInput);
+
+    const toolPlanPromise = options?.includeToolPlan
+      ? (async () => {
+          const planStart = Date.now();
+          const allTools = this.getClassifierTools();
+          if (allTools.length === 0) return undefined;
+          const planner = new ToolPlanner({ model: this.model });
+          const plan = await planner.plan(message, allTools);
+          timings.toolPlan = Date.now() - planStart;
+          return plan;
+        })().catch(() => undefined)
+      : Promise.resolve(undefined);
+
+    let classifierOutput;
+    let toolPlan;
+    try {
+      [classifierOutput, toolPlan] = await Promise.all([classifyPromise, toolPlanPromise]);
+    } catch (err) {
+      throw new DecisionError(
+        "Classifier failed",
+        err,
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+    timings.classify = Date.now() - classifyStart;
+
+    // === 5. Build Result ===
+    timings.total = Date.now() - startTime;
+
+    const decisionResult: DecisionAgentResult<T> = {
+      decision: classifierOutput.result,
+      rawText: classifierOutput.rawText ?? JSON.stringify(classifierOutput.result),
+      usage: {
+        promptTokens: classifierOutput.usage?.promptTokens ?? 0,
+        completionTokens: classifierOutput.usage?.completionTokens ?? 0,
+        totalTokens: classifierOutput.usage?.totalTokens ?? 0,
+      },
+      timings,
+      sessionId,
+      traceId,
+      trace: {
+        classifier: classifier.name ?? "unknown",
+        usedSummary: !!prefetched.summaryData?.summaryText,
+        usedMemory: !!prefetched.memoryContext,
+        usedKnowledge: !!prefetched.knowledgeContext,
+        toolPlan,
+        classifierTrace: classifierOutput.trace,
+      },
+    };
+
+    // === 7. Background: memory (user message only, no assistant response) ===
+    if (this.config.memoryManager && userId) {
+      this.config.memoryManager
+        .add(userId, [{ role: "user", content: message }])
+        .catch(() => {});
+    }
+
+    return decisionResult;
   }
 
   getEventBus(): EventBus {

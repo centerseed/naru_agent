@@ -9,6 +9,7 @@ export type {
   EmbedFn,
   ModelMessage,
 } from "./types.js";
+export { normalizeUsage } from "./types.js";
 export { EventBus } from "./event-bus.js";
 
 // Tools
@@ -68,6 +69,21 @@ export { RedisSessionStore } from "./session/redis-store.js";
 export type { CompressedSummary, BaseSummaryStore } from "./compression/base.js";
 export { ContextCompressor } from "./compression/compressor.js";
 export { InMemorySummaryStore } from "./compression/in-memory-store.js";
+
+// Decision mode
+export type {
+  StructuredClassifier,
+  StructuredClassifierInput,
+  StructuredClassifierOutput,
+  ToolPlan,
+  DecisionAgentResult,
+  DecisionOptions,
+} from "./decision/types.js";
+export { DecisionError } from "./decision/types.js";
+export { LLMStructuredClassifier } from "./decision/llm-structured-classifier.js";
+export type { LLMStructuredClassifierConfig } from "./decision/llm-structured-classifier.js";
+export { ToolPlanner } from "./decision/tool-planner.js";
+export type { ToolPlannerConfig } from "./decision/tool-planner.js";
 
 // Tracing
 export type { Trace, Span } from "./tracing/trace.js";

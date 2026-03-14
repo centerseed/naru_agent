@@ -16,6 +16,7 @@ import pytest
 from naru_agent.agent import NaruAgent, NaruResult
 from naru_agent.intent.base import IntentResult
 from naru_agent.intent.llm_classifier import LLMIntentClassifier
+from naru_agent.intent.tool_calling_classifier import LLMToolCallingClassifier
 from naru_agent.knowledge.base import KnowledgeResult
 from naru_agent.knowledge.chroma_store import ChromaKnowledgeStore
 from naru_agent.tools.base import tool
@@ -348,3 +349,125 @@ class TestMultiTurnSession:
         assert r2.content
         # Bob should NOT appear since it's a different session
         assert "Bob" not in r2.content
+
+
+# ---------------------------------------------------------------------------
+# Test: ToolCallingClassifier
+# ---------------------------------------------------------------------------
+
+
+class TestToolCallingClassifier:
+    def test_classifier_alone_selects_correct_tool(self):
+        """LLMToolCallingClassifier 直接呼叫，確認能選對工具並執行。"""
+        call_log = []
+
+        @tool(description="Get weather information for a city")
+        def get_weather(city: str) -> str:
+            call_log.append(city)
+            return f"Sunny in {city}, 25°C"
+
+        @tool(description="Get user's profile information")
+        def get_user_profile(user_id: str) -> str:
+            call_log.append(user_id)
+            return f"Profile for {user_id}: premium member"
+
+        classifier = LLMToolCallingClassifier(
+            model=MODEL,
+            api_key=os.getenv("GEMINI_API_KEY"),
+        )
+        result = classifier.classify(
+            "What's the weather in Tokyo?",
+            [get_weather, get_user_profile],
+        )
+
+        assert len(result.tool_results) >= 1
+        tool_names = [r["tool"] for r in result.tool_results]
+        assert "get_weather" in tool_names
+        # get_user_profile should NOT be called
+        assert "get_user_profile" not in tool_names
+        # Result should contain weather info
+        assert any("Sunny" in r["result"] or "Tokyo" in r["result"] for r in result.tool_results)
+        assert result.usage.get("total_tokens", 0) > 0 or result.usage.get("total", 0) > 0
+
+    def test_classifier_no_tool_needed(self):
+        """訊息不需要 tool → tool_results 為空，raw_response 有內容。"""
+        @tool(description="Place an order for a product")
+        def place_order(product_id: str, quantity: int) -> str:
+            return f"Order placed: {quantity}x {product_id}"
+
+        classifier = LLMToolCallingClassifier(
+            model=MODEL,
+            api_key=os.getenv("GEMINI_API_KEY"),
+        )
+        result = classifier.classify("Hello, how are you?", [place_order])
+
+        # For a greeting, no tool should be called
+        assert result.tool_results == []
+        assert result.raw_response  # Should have a text response
+
+    def test_agent_uses_tool_calling_classifier(self):
+        """NaruAgent 掛載 tool_calling_classifier，確認 tool results 注入 instructions。"""
+        call_log = []
+
+        @tool(description="Get product price by product ID")
+        def get_price(product_id: str) -> str:
+            call_log.append(product_id)
+            return f"Product {product_id} costs NT$1,200"
+
+        from naru_agent.intent.base import BaseIntentClassifier
+
+        class AlwaysNY(BaseIntentClassifier):
+            """Always returns NY: no knowledge, but needs tools."""
+            def classify(self, message):
+                return IntentResult(needs_knowledge=False, needs_tools=True, raw="NY")
+
+        classifier = LLMToolCallingClassifier(
+            model=MODEL,
+            api_key=os.getenv("GEMINI_API_KEY"),
+        )
+        agent = NaruAgent(
+            model=MODEL,
+            api_key=os.getenv("GEMINI_API_KEY"),
+            instructions=["You are a product assistant. Answer based on tool results."],
+            tools=[get_price],
+            intent_classifier=AlwaysNY(),
+            tool_calling_classifier=classifier,
+        )
+
+        result = agent.chat("How much does product P-001 cost?")
+
+        assert result.content
+        assert not result.blocked
+        # tool_calling_classifier should have called get_price
+        assert len(call_log) >= 1
+
+    def test_classifier_multiple_tools_parallel(self):
+        """多個 tool calls 並行執行，確認全部結果都回來。"""
+        call_log = []
+
+        @tool(description="Get stock price for a ticker symbol")
+        def get_stock_price(ticker: str) -> str:
+            call_log.append(ticker)
+            return f"{ticker}: $150.00"
+
+        @tool(description="Get market cap for a ticker symbol")
+        def get_market_cap(ticker: str) -> str:
+            call_log.append(f"cap_{ticker}")
+            return f"{ticker} market cap: $2.5T"
+
+        classifier = LLMToolCallingClassifier(
+            model=MODEL,
+            api_key=os.getenv("GEMINI_API_KEY"),
+            system_prompt=(
+                "You are a financial assistant. "
+                "For stock queries, call BOTH get_stock_price AND get_market_cap."
+            ),
+        )
+        result = classifier.classify(
+            "Give me full info on AAPL stock including price and market cap.",
+            [get_stock_price, get_market_cap],
+        )
+
+        # At least one tool should be called
+        assert len(result.tool_results) >= 1
+        assert result.usage

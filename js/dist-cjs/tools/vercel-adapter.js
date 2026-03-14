@@ -1,6 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.toVercelTools = toVercelTools;
+exports.toVercelToolsNoop = toVercelToolsNoop;
 const ai_1 = require("ai");
 /**
  * Convert naru BaseTool[] to Vercel AI SDK ToolSet record.
@@ -45,6 +46,23 @@ function toVercelTools(tools) {
                 // unreachable, but satisfies TS
                 return `[Tool Error] ${t.name}: unknown failure`;
             },
+        });
+    }
+    return result;
+}
+/**
+ * Same as toVercelTools but with a no-op execute.
+ * Useful for tool planning where you need LLM tool selection
+ * without actually executing tools.
+ */
+function toVercelToolsNoop(tools) {
+    const result = {};
+    for (const t of tools) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        result[t.name] = ai_1.tool({
+            description: t.description,
+            parameters: t.parameters,
+            execute: async () => "",
         });
     }
     return result;

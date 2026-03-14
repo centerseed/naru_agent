@@ -9,6 +9,15 @@ export interface TokenUsage {
   cacheWriteTokens?: number;
 }
 
+/** Map Vercel AI SDK usage shape → naru TokenUsage. */
+export function normalizeUsage(
+  usage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number },
+): TokenUsage {
+  const p = usage?.inputTokens ?? 0;
+  const c = usage?.outputTokens ?? 0;
+  return { promptTokens: p, completionTokens: c, totalTokens: usage?.totalTokens ?? p + c };
+}
+
 export interface NaruResult {
   content: string;
   blocked: boolean;
