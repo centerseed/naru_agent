@@ -75,3 +75,36 @@ export { createTrace, createSpan } from "./tracing/trace.js";
 export { TraceCollector } from "./tracing/collector.js";
 export type { BaseTraceExporter } from "./tracing/exporters/jsonl.js";
 export { JSONLTraceExporter } from "./tracing/exporters/jsonl.js";
+
+// Orchestration
+export {
+  AgentOrchestrator,
+  DeterministicIntentResolver,
+  LLMFallbackIntentResolver,
+  InMemoryPendingStateManager,
+  InMemorySessionStateStore,
+  classifyConfirmationDisposition,
+} from "./orchestration/index.js";
+export type {
+  AgentChatDelegate,
+  AgentOrchestratorConfig,
+  LifecycleHooks,
+  GenericIntentObject,
+  OrchestratorIntent,
+  BaseIntentResolver,
+  DeterministicPattern,
+  IntentResolveInput,
+  BaseDirectExecutor,
+  ChannelAdapter,
+  ChannelMessage,
+  PendingState,
+  ConfirmationDisposition,
+  BasePendingStateManager,
+  AgentSessionState,
+  BaseSessionStateStore,
+  AgentDecisionTrace,
+  OrchestrationPhase,
+  OrchestrationTimings,
+  OrchestrationResult,
+  PendingConfirmation,
+} from "./orchestration/index.js";
