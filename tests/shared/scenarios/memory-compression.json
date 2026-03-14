@@ -1,0 +1,63 @@
+{
+  "scenarios": [
+    {
+      "id": "memory_fact_extraction",
+      "ac": "ac19",
+      "description": "MemoryManager 萃取並儲存事實",
+      "type": "memory_extraction",
+      "messages": [
+        { "role": "user", "content": "我叫 Alice，住在台北，我最喜歡 Python 程式語言。" },
+        { "role": "assistant", "content": "很高興認識你 Alice！台北是個很棒的城市。Python 確實是很優秀的語言。" }
+      ],
+      "expect": {
+        "content_keywords_any": ["alice", "taipei", "台北"],
+        "tokens_min": 2
+      }
+    },
+    {
+      "id": "memory_cross_turn_recall",
+      "ac": "ac19",
+      "description": "跨對話輪次記憶回憶",
+      "type": "multi_turn",
+      "turns": [
+        { "input": "我對花生嚴重過敏，請記住這件事。" },
+        { "input": "我有什麼過敏？", "expect_keywords": ["花生", "peanut"] }
+      ],
+      "expect": {
+        "blocked": false,
+        "content_not_empty": true
+      }
+    },
+    {
+      "id": "compression_date_retention",
+      "ac": "ac20",
+      "description": "壓縮後保留 March 15 deadline",
+      "type": "compression",
+      "turns": [
+        { "input": "The project deadline is March 15. Please remember this date." },
+        { "input": "We need to use Python 3.12 for the project." },
+        { "input": "The team lead is Dr. Wang." },
+        { "input": "We should deploy to AWS." },
+        { "input": "Let's use PostgreSQL for the database." }
+      ],
+      "recall_question": "What is the project deadline?",
+      "expect": {
+        "content_keywords_any": ["March 15", "3月15", "3/15", "三月十五"]
+      }
+    },
+    {
+      "id": "compression_multi_fact_retention",
+      "ac": "ac20",
+      "description": "壓縮後多事實保留率",
+      "type": "compression_multi_fact",
+      "facts": [
+        { "text": "The budget is $50,000.", "keywords": ["50,000", "50000", "$50"] },
+        { "text": "The client name is Acme Corp.", "keywords": ["Acme", "acme"] },
+        { "text": "The tech stack is React and Node.js.", "keywords": ["React", "Node", "react", "node"] }
+      ],
+      "expect": {
+        "tokens_min": 0.66
+      }
+    }
+  ]
+}

@@ -1,10 +1,14 @@
 /**
- * NaruAgent JS 品質保證 Baseline 測試套件。
+ * Quality Integration Tests — @ac15, @ac16, @ac17, @ac18
  *
- * 覆蓋：大量 tools 正確呼叫、多用戶並發、token 用量合理性、回應品質、trace 完整性。
+ * Covers:
+ *   @ac15 — Token 使用量合理性
+ *   @ac16 — 並行使用者隔離
+ *   @ac17 — 回應品質
+ *   @ac18 — Trace 完整性
  *
- * 執行：
- *   GOOGLE_GENERATIVE_AI_API_KEY=xxx npx vitest run tests/integration/test_quality_baseline.test.ts
+ * Execute:
+ *   GOOGLE_GENERATIVE_AI_API_KEY=xxx npx vitest run tests/integration/test_quality.test.ts
  */
 
 import { describe, it, expect, beforeEach } from "vitest";
@@ -20,66 +24,51 @@ import {
   getModel,
 } from "./helpers.js";
 import { LLMIntentClassifier } from "../../src/intent/llm-classifier.js";
+import { InMemorySessionStore } from "../../src/session/in-memory-store.js";
 
 const HAS_API_KEY = !!process.env.GOOGLE_GENERATIVE_AI_API_KEY;
 const describeIf = HAS_API_KEY ? describe : describe.skip;
 
-// ===========================================================================
-// 1. TestManyTools — 大量 Tools 正確呼叫
-// ===========================================================================
+// ---------------------------------------------------------------------------
+// @ac15 — Token 使用量
+// ---------------------------------------------------------------------------
 
-describeIf("ManyTools", () => {
-  beforeEach(() => clearCallLog());
+describeIf("Quality_TokenUsage (@ac15)", () => {
+  it("simple chat within token budget", async () => {
+    const baseline = loadBaseline();
+    const maxTokens = baseline.simple_chat_max_tokens as number;
+    const agent = makeAgent();
+    const result = await agent.chat("你好");
 
-  it("selects correct tool from 16", async () => {
+    expect(result.usage.totalTokens).toBeGreaterThan(0);
+    expect(result.usage.totalTokens).toBeLessThanOrEqual(maxTokens);
+  }, 30_000);
+
+  it("tool call (16 tools) within token budget", async () => {
+    const baseline = loadBaseline();
+    const maxTokens = baseline.tool_call_16_tools_max_tokens as number;
     const agent = makeAgent({ tools: ALL_TOOLS });
     const result = await agent.chat("請幫我計算寄到台北的運費，包裹重量 2 公斤");
 
-    expect(result.blocked).toBe(false);
-    expect(result.content).toBeTruthy();
-    expect(result.toolCalls).toContain("calculate_shipping_cost");
+    expect(result.usage.totalTokens).toBeGreaterThan(0);
+    expect(result.usage.totalTokens).toBeLessThanOrEqual(maxTokens);
   }, 60_000);
 
-  it("chains multiple tools (search → detail/inventory)", async () => {
-    const agent = makeAgent({ tools: ALL_TOOLS });
-    const result = await agent.chat(
-      "幫我搜尋無線耳機，然後查看第一個產品的詳情和庫存",
-    );
+  it("has all required usage fields", async () => {
+    const agent = makeAgent();
+    const result = await agent.chat("你好");
 
-    expect(result.blocked).toBe(false);
-    const names = callLog.map((c) => c.tool as string);
-    expect(names).toContain("search_products");
-    expect(
-      names.includes("get_product_detail") || names.includes("check_inventory"),
-    ).toBe(true);
-
-    if (names.includes("get_product_detail")) {
-      expect(names.indexOf("search_products")).toBeLessThan(
-        names.indexOf("get_product_detail"),
-      );
-    }
-  }, 60_000);
-
-  it("includes tool result data in response", async () => {
-    const agent = makeAgent({ tools: ALL_TOOLS });
-    const result = await agent.chat("請幫我計算寄到台北的運費，包裹重量 2 公斤");
-
-    expect(result.blocked).toBe(false);
-    expect(result.toolCalls.length).toBeGreaterThan(0);
-    // cost = 60 + 2*25 = 110
-    expect(
-      ["110", "運費", "費用", "cost", "元"].some((kw) =>
-        result.content.includes(kw),
-      ),
-    ).toBe(true);
-  }, 60_000);
+    expect(result.usage.promptTokens).toBeGreaterThan(0);
+    expect(result.usage.completionTokens).toBeGreaterThan(0);
+    expect(result.usage.totalTokens).toBeGreaterThan(0);
+  }, 30_000);
 });
 
-// ===========================================================================
-// 2. TestConcurrency — 多用戶並發
-// ===========================================================================
+// ---------------------------------------------------------------------------
+// @ac16 — 並行使用者隔離
+// ---------------------------------------------------------------------------
 
-describeIf("Concurrency", () => {
+describeIf("Quality_Concurrency (@ac16)", () => {
   beforeEach(() => clearCallLog());
 
   it("handles concurrent different users", async () => {
@@ -98,21 +87,21 @@ describeIf("Concurrency", () => {
     );
 
     const fulfilled = results.filter((r) => r.status === "fulfilled");
-    // At least 2/3 must succeed (1 may fail due to Gemini free-tier rate limiting)
-    expect(fulfilled.length).toBeGreaterThanOrEqual(2);
+    // Honor the baseline contract: concurrent_users_must_all_succeed
+    const baseline = loadBaseline();
+    const mustAllSucceed = baseline.concurrent_users_must_all_succeed as boolean;
+    const minSuccess = mustAllSucceed
+      ? requests.length
+      : Math.ceil(requests.length * 0.67);
+    expect(fulfilled.length).toBeGreaterThanOrEqual(minSuccess);
     for (const r of fulfilled) {
       if (r.status === "fulfilled") {
         expect(r.value.blocked).toBe(false);
-        // Allow empty content on rate-limit (fallback response)
-        // but at least the result should not be blocked
       }
     }
   }, 90_000);
 
-  it("maintains same-session context", async () => {
-    const { InMemorySessionStore } = await import(
-      "../../src/session/in-memory-store.js"
-    );
+  it("maintains same-session context across turns", async () => {
     const sessionStore = new InMemorySessionStore();
     const agent = makeAgent({ tools: ALL_TOOLS, sessionStore });
     const sid = "shared-session-serial";
@@ -134,48 +123,11 @@ describeIf("Concurrency", () => {
   }, 60_000);
 });
 
-// ===========================================================================
-// 3. TestTokenUsage — Token 用量合理性
-// ===========================================================================
+// ---------------------------------------------------------------------------
+// @ac17 — 回應品質
+// ---------------------------------------------------------------------------
 
-describeIf("TokenUsage", () => {
-  it("simple chat within token budget", async () => {
-    const baseline = loadBaseline();
-    const maxTokens = baseline.simple_chat_max_tokens as number;
-    const agent = makeAgent();
-    const result = await agent.chat("你好");
-
-    const total = result.usage.totalTokens;
-    expect(total).toBeGreaterThan(0);
-    expect(total).toBeLessThanOrEqual(maxTokens);
-  }, 30_000);
-
-  it("tool call (16 tools) within token budget", async () => {
-    const baseline = loadBaseline();
-    const maxTokens = baseline.tool_call_16_tools_max_tokens as number;
-    const agent = makeAgent({ tools: ALL_TOOLS });
-    const result = await agent.chat("請幫我計算寄到台北的運費，包裹重量 2 公斤");
-
-    const total = result.usage.totalTokens;
-    expect(total).toBeGreaterThan(0);
-    expect(total).toBeLessThanOrEqual(maxTokens);
-  }, 60_000);
-
-  it("has all required usage fields", async () => {
-    const agent = makeAgent();
-    const result = await agent.chat("你好");
-
-    expect(result.usage.promptTokens).toBeGreaterThan(0);
-    expect(result.usage.completionTokens).toBeGreaterThan(0);
-    expect(result.usage.totalTokens).toBeGreaterThan(0);
-  }, 30_000);
-});
-
-// ===========================================================================
-// 4. TestResponseQuality — 回應品質
-// ===========================================================================
-
-describeIf("ResponseQuality", () => {
+describeIf("Quality_ResponseQuality (@ac17)", () => {
   beforeEach(() => clearCallLog());
 
   it("includes tool result data in response", async () => {
@@ -213,11 +165,11 @@ describeIf("ResponseQuality", () => {
   }, 60_000);
 });
 
-// ===========================================================================
-// 5. TestTraceCompleteness — Trace 完整性
-// ===========================================================================
+// ---------------------------------------------------------------------------
+// @ac18 — Trace 完整性
+// ---------------------------------------------------------------------------
 
-describeIf("TraceCompleteness", () => {
+describeIf("Quality_TraceCompleteness (@ac18)", () => {
   function makeTmpFile(): string {
     const dir = mkdtempSync(join(tmpdir(), "naru-trace-"));
     return join(dir, "trace.jsonl");
@@ -238,7 +190,6 @@ describeIf("TraceCompleteness", () => {
     const agent = makeAgent({ tools: ALL_TOOLS, traceFile });
     const result = await agent.chat("請幫我計算寄到台北的運費，包裹重量 1 公斤");
 
-    // Wait for async export
     await new Promise((r) => setTimeout(r, 500));
 
     const traces = readTraces(traceFile);

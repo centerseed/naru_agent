@@ -1,0 +1,77 @@
+{
+  "scenarios": [
+    {
+      "id": "vector_retrieval_chromadb",
+      "ac": "ac6",
+      "description": "向量知識檢索 - ChromaDB 問題",
+      "input": "Naru 用什麼向量資料庫？",
+      "expect": {
+        "blocked": false,
+        "content_keywords_any": ["ChromaDB", "chromadb", "cosine"],
+        "content_not_empty": true
+      }
+    },
+    {
+      "id": "vector_retrieval_facts",
+      "ac": "ac6",
+      "description": "向量知識檢索 - 事實萃取",
+      "input": "記憶系統如何提取資訊？",
+      "expect": {
+        "blocked": false,
+        "content_keywords_any": ["fact extraction", "reconciliation", "事實", "萃取", "和解"],
+        "content_not_empty": true
+      }
+    },
+    {
+      "id": "vector_retrieval_refusal",
+      "ac": "ac6",
+      "tags": ["edge-case"],
+      "description": "向量知識檢索 - 拒絕未知資訊",
+      "input": "Naru Agent 的定價是多少？",
+      "expect": {
+        "blocked": false,
+        "content_not_empty": true
+      }
+    },
+    {
+      "id": "graph_search_medications",
+      "ac": "ac7",
+      "description": "知識圖譜查詢 - 治療頭痛藥物",
+      "input": "treats headaches",
+      "graph_search": true,
+      "expect": {
+        "content_keywords_any": ["aspirin", "ibuprofen"],
+        "content_not_empty": true
+      }
+    },
+    {
+      "id": "graph_search_stress",
+      "ac": "ac7",
+      "description": "知識圖譜查詢 - 減壓方法",
+      "input": "reduce stress",
+      "graph_search": true,
+      "expect": {
+        "content_keywords_any": ["meditation"],
+        "content_not_empty": true
+      }
+    },
+    {
+      "id": "graph_min_entities",
+      "ac": "ac7",
+      "description": "知識圖譜 - 最少實體數 (threshold read from quality_baseline.json → graph_min_entities)",
+      "type": "graph_structure",
+      "metric": "entities",
+      "note": "Assertion is performed inline in test_rag.test.ts via loadBaseline().graph_min_entities; no assertScenarioResult call is made.",
+      "expect": {}
+    },
+    {
+      "id": "graph_min_relations",
+      "ac": "ac7",
+      "description": "知識圖譜 - 最少關係數 (threshold read from quality_baseline.json → graph_min_relations)",
+      "type": "graph_structure",
+      "metric": "relations",
+      "note": "Assertion is performed inline in test_rag.test.ts via loadBaseline().graph_min_relations; no assertScenarioResult call is made.",
+      "expect": {}
+    }
+  ]
+}

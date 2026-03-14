@@ -1,0 +1,73 @@
+{
+  "tags": ["js-only"],
+  "scenarios": [
+    {
+      "id": "single_agent_passthrough",
+      "ac": "ac11",
+      "description": "單一 Agent Passthrough",
+      "input": "你好",
+      "expect": {
+        "blocked": false,
+        "content_not_empty": true
+      }
+    },
+    {
+      "id": "intent_routing_order",
+      "ac": "ac12",
+      "description": "Intent 路由 - 訂單查詢",
+      "input": "查詢訂單狀態",
+      "pattern": "訂單",
+      "route_to": "order_agent",
+      "expect": {
+        "blocked": false,
+        "content_not_empty": true
+      }
+    },
+    {
+      "id": "intent_routing_product",
+      "ac": "ac12",
+      "description": "Intent 路由 - 產品搜尋",
+      "input": "搜尋產品",
+      "pattern": "產品|搜尋",
+      "route_to": "product_agent",
+      "expect": {
+        "blocked": false,
+        "content_not_empty": true
+      }
+    },
+    {
+      "id": "intent_routing_default",
+      "ac": "ac12",
+      "description": "Intent 路由 - 使用 Default Delegate",
+      "input": "你好",
+      "route_to": "default",
+      "expect": {
+        "blocked": false,
+        "content_not_empty": true
+      }
+    },
+    {
+      "id": "direct_executor",
+      "ac": "ac13",
+      "description": "Direct Executor 繞過 LLM",
+      "input": "ping",
+      "pattern": "ping",
+      "executor_response": "pong",
+      "expect": {
+        "blocked": false,
+        "content_keywords_any": ["pong"]
+      }
+    },
+    {
+      "id": "multi_step_confirmation",
+      "ac": "ac14",
+      "description": "多步驟確認流程",
+      "input": "刪除所有訂單",
+      "confirmation_input": "確認",
+      "expect": {
+        "blocked": false,
+        "content_not_empty": true
+      }
+    }
+  ]
+}

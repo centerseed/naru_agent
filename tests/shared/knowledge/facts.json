@@ -1,0 +1,11 @@
+{
+  "facts": [
+    "Naru Agent supports over 100 LLM models through LiteLLM integration.",
+    "The default vector database for development is ChromaDB with cosine similarity.",
+    "Context compression triggers when conversation rounds exceed the threshold.",
+    "Guardrails can use keyword matching, regex patterns, or custom LLM evaluation.",
+    "The memory system uses LLM-driven fact extraction followed by reconciliation.",
+    "GraphKnowledgeStore uses NetworkX for knowledge graph with BFS-based search.",
+    "Tool selection uses embedding similarity to dynamically filter top-k tools."
+  ]
+}

@@ -21,6 +21,9 @@ import type { LanguageModel } from "ai";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
+// Shared root for cross-language test data
+const SHARED_ROOT = resolve(__dirname, "../../../tests/shared");
+
 export function getModel(): LanguageModel {
   return google(process.env.CHAT_AGENT_MODEL ?? "gemini-2.5-flash-lite");
 }
@@ -47,7 +50,7 @@ export const embedFn: EmbedFn = async (texts: string[]) => {
 
 export function loadBaseline(): Record<string, number | boolean> {
   const raw = readFileSync(
-    resolve(__dirname, "baselines/quality_baseline.json"),
+    resolve(SHARED_ROOT, "baselines/quality_baseline.json"),
     "utf-8",
   );
   return JSON.parse(raw);
@@ -313,6 +316,8 @@ export function makeAgent(
     summaryModel?: LanguageModel;
     compressionThresholdRounds?: number;
     compressionKeepLastRounds?: number;
+    guardrails?: import("../../src/guardrails/base.js").BaseGuardrail[];
+    skills?: import("../../src/skills/base.js").BaseSkill[];
   } = {},
 ): NaruAgent {
   const extra: Record<string, unknown> = {};
@@ -332,26 +337,34 @@ export function makeAgent(
     summaryModel: opts.summaryModel,
     compressionThresholdRounds: opts.compressionThresholdRounds,
     compressionKeepLastRounds: opts.compressionKeepLastRounds,
+    guardrails: opts.guardrails,
+    skills: opts.skills,
     ...extra,
   });
 }
 
 // ---------------------------------------------------------------------------
-// Knowledge facts
+// Knowledge facts — loaded from tests/shared/knowledge/
 // ---------------------------------------------------------------------------
 
-export const KNOWLEDGE_FACTS = [
-  "Naru Agent supports over 100 LLM models through LiteLLM integration.",
-  "The default vector database for development is ChromaDB with cosine similarity.",
-  "Context compression triggers when conversation rounds exceed the threshold.",
-  "Guardrails can use keyword matching, regex patterns, or custom LLM evaluation.",
-  "The memory system uses LLM-driven fact extraction followed by reconciliation.",
-  "GraphKnowledgeStore uses NetworkX for knowledge graph with BFS-based search.",
-  "Tool selection uses embedding similarity to dynamically filter top-k tools.",
-];
+function loadKnowledgeFacts(): string[] {
+  const raw = readFileSync(
+    resolve(SHARED_ROOT, "knowledge/facts.json"),
+    "utf-8",
+  );
+  const parsed = JSON.parse(raw) as { facts: string[] };
+  return parsed.facts;
+}
 
-export const GRAPH_TEXT = `
-Aspirin is a medication that treats headaches. Headaches are a symptom of migraines.
-Migraines can be caused by stress. Ibuprofen also treats headaches.
-Stress can be reduced by meditation. Meditation is related to mindfulness.
-`;
+function loadGraphText(): string {
+  const raw = readFileSync(
+    resolve(SHARED_ROOT, "knowledge/graph-text.json"),
+    "utf-8",
+  );
+  const parsed = JSON.parse(raw) as { text: string };
+  return parsed.text;
+}
+
+export const KNOWLEDGE_FACTS: string[] = loadKnowledgeFacts();
+
+export const GRAPH_TEXT: string = loadGraphText();

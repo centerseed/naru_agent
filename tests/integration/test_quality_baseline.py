@@ -27,7 +27,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 MODEL = os.getenv("CHAT_AGENT_MODEL", "gemini/gemini-2.5-flash-lite")
-BASELINE_PATH = Path(__file__).parent / "baselines" / "quality_baseline.json"
+BASELINE_PATH = Path(__file__).parent.parent / "shared" / "baselines" / "quality_baseline.json"
 
 
 def load_baseline() -> dict:

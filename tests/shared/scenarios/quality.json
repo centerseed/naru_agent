@@ -1,0 +1,138 @@
+{
+  "scenarios": [
+    {
+      "id": "simple_chat_token_budget",
+      "ac": "ac15",
+      "description": "簡單對話在 token 預算內",
+      "input": "你好",
+      "expect": {
+        "blocked": false,
+        "tokens_max": "simple_chat_max_tokens",
+        "content_not_empty": true
+      }
+    },
+    {
+      "id": "tool_call_token_budget",
+      "ac": "ac15",
+      "description": "工具呼叫在 token 預算內",
+      "input": "請幫我計算寄到台北的運費，包裹重量 2 公斤",
+      "use_all_tools": true,
+      "expect": {
+        "blocked": false,
+        "tokens_max": "tool_call_16_tools_max_tokens",
+        "content_not_empty": true
+      }
+    },
+    {
+      "id": "usage_fields_complete",
+      "ac": "ac15",
+      "description": "usage 欄位完整",
+      "input": "你好",
+      "expect": {
+        "blocked": false,
+        "content_not_empty": true
+      }
+    },
+    {
+      "id": "concurrent_user_isolation",
+      "ac": "ac16",
+      "description": "並行使用者隔離",
+      "type": "concurrent",
+      "requests": [
+        { "userId": "user_1", "sessionId": "sess_1", "msg": "請幫我計算寄到台北的運費，包裹重量 3 公斤" },
+        { "userId": "user_2", "sessionId": "sess_2", "msg": "幫我搜尋藍牙耳機" },
+        { "userId": "user_3", "sessionId": "sess_3", "msg": "查詢訂單 ORD-100 的狀態" }
+      ],
+      "expect": {
+        "min_success_count": 2,
+        "blocked": false
+      }
+    },
+    {
+      "id": "session_context_retention",
+      "ac": "ac16",
+      "description": "同 session 記憶上下文",
+      "type": "multi_turn",
+      "turns": [
+        { "input": "我叫做小明，請記住我的名字。" },
+        { "input": "我叫什麼名字？", "expect_keywords": ["小明"] }
+      ],
+      "expect": {
+        "blocked": false,
+        "content_not_empty": true
+      }
+    },
+    {
+      "id": "tool_result_quality",
+      "ac": "ac17",
+      "description": "工具結果納入回應品質",
+      "input": "追蹤包裹 TRK-ABC123",
+      "expect": {
+        "blocked": false,
+        "toolCalls_contains": ["track_shipment"],
+        "content_keywords_any": ["台北", "轉運", "transit", "TRK"]
+      }
+    },
+    {
+      "id": "language_instruction",
+      "ac": "ac17",
+      "description": "語言指令遵從性（繁體中文）",
+      "input": "Please introduce yourself and explain what you can help with.",
+      "expect": {
+        "blocked": false,
+        "content_not_empty": true
+      }
+    },
+    {
+      "id": "no_hallucinated_tools",
+      "ac": "ac17",
+      "description": "不幻覺工具名稱",
+      "input": "請幫我計算寄到台北的運費，包裹重量 2 公斤",
+      "use_all_tools": true,
+      "expect": {
+        "blocked": false,
+        "content_not_empty": true
+      }
+    },
+    {
+      "id": "trace_fields_complete",
+      "ac": "ac18",
+      "description": "Trace 欄位完整",
+      "input": "請幫我計算寄到台北的運費，包裹重量 1 公斤",
+      "use_all_tools": true,
+      "expect": {
+        "trace_min_spans": 1,
+        "content_not_empty": true
+      }
+    },
+    {
+      "id": "trace_llm_spans",
+      "ac": "ac18",
+      "description": "Trace 包含 LLM spans",
+      "input": "請幫我計算寄到台北的運費，包裹重量 1 公斤",
+      "use_all_tools": true,
+      "expect": {
+        "trace_min_spans": 1
+      }
+    },
+    {
+      "id": "trace_timing_consistent",
+      "ac": "ac18",
+      "description": "Trace 時序一致性",
+      "input": "查詢訂單 ORD-100 的狀態",
+      "use_all_tools": true,
+      "expect": {
+        "trace_min_spans": 1
+      }
+    },
+    {
+      "id": "trace_jsonl_parseable",
+      "ac": "ac18",
+      "description": "JSONL 輸出可解析",
+      "input": "你好",
+      "expect": {
+        "content_not_empty": true
+      }
+    }
+  ]
+}

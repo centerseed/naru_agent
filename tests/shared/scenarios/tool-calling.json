@@ -1,0 +1,72 @@
+{
+  "scenarios": [
+    {
+      "id": "single_tool_selection",
+      "ac": "ac3",
+      "description": "單一工具選擇",
+      "input": "請幫我計算寄到台北的運費，包裹重量 2 公斤",
+      "expect": {
+        "blocked": false,
+        "toolCalls_contains": ["calculate_shipping_cost"],
+        "content_not_empty": true
+      }
+    },
+    {
+      "id": "chitchat_no_tools",
+      "ac": "ac3",
+      "tags": ["edge-case"],
+      "description": "閒聊不觸發工具",
+      "input": "你好，今天天氣真好",
+      "expect": {
+        "blocked": false,
+        "toolCalls_max_count": 0,
+        "content_not_empty": true
+      }
+    },
+    {
+      "id": "tool_result_in_response",
+      "ac": "ac3",
+      "description": "工具結果包含在回應中",
+      "input": "請幫我計算寄到台北的運費，包裹重量 2 公斤",
+      "expect": {
+        "blocked": false,
+        "toolCalls_contains": ["calculate_shipping_cost"],
+        "content_keywords_any": ["110", "運費", "費用", "cost", "元"]
+      }
+    },
+    {
+      "id": "multi_tool_chaining",
+      "ac": "ac4",
+      "description": "多工具鏈式呼叫",
+      "input": "幫我搜尋無線耳機，然後查看第一個產品的詳情和庫存",
+      "expect": {
+        "blocked": false,
+        "toolCalls_contains": ["search_products"],
+        "toolCalls_contains_any": ["get_product_detail", "check_inventory"],
+        "content_not_empty": true
+      }
+    },
+    {
+      "id": "tool_chain_order",
+      "ac": "ac4",
+      "description": "工具鏈呼叫順序：搜尋→庫存→訂單",
+      "input": "幫我搜尋耳機，然後查第一個產品的庫存，最後幫我訂 2 個",
+      "expect": {
+        "blocked": false,
+        "toolCalls_contains": ["search_products", "check_inventory", "create_order"],
+        "content_not_empty": true
+      }
+    },
+    {
+      "id": "parallel_tool_execution",
+      "ac": "ac5",
+      "description": "並行工具執行",
+      "input": "同時幫我查詢訂單 ORD-100 的狀態和用戶 U001 的資料",
+      "expect": {
+        "blocked": false,
+        "toolCalls_contains_any": ["get_order_status", "get_user_profile"],
+        "content_not_empty": true
+      }
+    }
+  ]
+}

@@ -1,0 +1,70 @@
+{
+  "skills_definition": {
+    "weather_skill": {
+      "name": "weather",
+      "description": "天氣查詢技能",
+      "triggers": ["天氣", "氣溫", "下雨"],
+      "promptInjection": "你現在具備天氣查詢能力。回答天氣問題時，使用 get_weather 工具。",
+      "extraTools": [
+        {
+          "name": "get_weather",
+          "description": "查詢指定城市天氣",
+          "parameters": { "city": "string" },
+          "mockReturn": "{\"city\":\"台北\",\"temp\":\"22°C\",\"condition\":\"晴天\"}"
+        }
+      ]
+    },
+    "greeting_skill": {
+      "name": "greeting",
+      "description": "問候技能",
+      "triggers": [],
+      "alwaysActive": true,
+      "promptInjection": "每次回覆開頭加上友善的問候語。"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "keyword_trigger",
+      "ac": "ac8",
+      "description": "關鍵字觸發 Skill",
+      "skill": "weather_skill",
+      "input": "台北今天天氣如何？",
+      "expect": {
+        "toolCalls_contains": ["get_weather"],
+        "content_not_empty": true
+      }
+    },
+    {
+      "id": "no_trigger",
+      "ac": "ac8",
+      "tags": ["edge-case"],
+      "description": "無觸發詞不啟動 Skill",
+      "skill": "weather_skill",
+      "input": "你好，我想問一個問題",
+      "expect": {
+        "toolCalls_not_contains": ["get_weather"]
+      }
+    },
+    {
+      "id": "skill_injects_tool",
+      "ac": "ac9",
+      "description": "Skill 注入額外工具",
+      "skill": "weather_skill",
+      "input": "查一下高雄的天氣",
+      "expect": {
+        "toolCalls_contains": ["get_weather"],
+        "content_keywords_any": ["高雄"]
+      }
+    },
+    {
+      "id": "always_active",
+      "ac": "ac10",
+      "description": "Always-active Skill",
+      "skill": "greeting_skill",
+      "input": "1+1等於多少？",
+      "expect": {
+        "content_not_empty": true
+      }
+    }
+  ]
+}

@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.JSONLTraceExporter = exports.TraceCollector = exports.createSpan = exports.createTrace = exports.InMemorySummaryStore = exports.ContextCompressor = exports.RedisSessionStore = exports.InMemorySessionStore = exports.LLMToolCallingClassifier = exports.LLMIntentClassifier = exports.KeywordGuardrail = exports.HybridKnowledgeStore = exports.GraphKnowledgeStore = exports.PgVectorKnowledgeStore = exports.ChunkContextualizer = exports.ChromaKnowledgeStore = exports.InMemoryKnowledgeStore = exports.formatKnowledgeContext = exports.PgVectorMemoryStore = exports.InMemoryMemoryStore = exports.Mem0MemoryManager = exports.LLMMemoryManager = exports.MemoryManager = exports.formatMemoryContext = exports.EmbeddingSkillSelector = exports.KeywordSkillSelector = exports.SkillRegistry = exports.makeSkillResult = exports.skill = exports.toVercelTools = exports.tool = exports.EventBus = exports.NaruAgent = void 0;
+exports.classifyConfirmationDisposition = exports.InMemorySessionStateStore = exports.InMemoryPendingStateManager = exports.LLMFallbackIntentResolver = exports.DeterministicIntentResolver = exports.AgentOrchestrator = exports.JSONLTraceExporter = exports.TraceCollector = exports.createSpan = exports.createTrace = exports.InMemorySummaryStore = exports.ContextCompressor = exports.RedisSessionStore = exports.InMemorySessionStore = exports.LLMToolCallingClassifier = exports.LLMIntentClassifier = exports.KeywordGuardrail = exports.HybridKnowledgeStore = exports.GraphKnowledgeStore = exports.PgVectorKnowledgeStore = exports.ChunkContextualizer = exports.ChromaKnowledgeStore = exports.InMemoryKnowledgeStore = exports.formatKnowledgeContext = exports.PgVectorMemoryStore = exports.InMemoryMemoryStore = exports.Mem0MemoryManager = exports.LLMMemoryManager = exports.MemoryManager = exports.formatMemoryContext = exports.EmbeddingSkillSelector = exports.KeywordSkillSelector = exports.SkillRegistry = exports.makeSkillResult = exports.skill = exports.toVercelTools = exports.tool = exports.EventBus = exports.NaruAgent = void 0;
 // Core
 var agent_js_1 = require("./agent.js");
 Object.defineProperty(exports, "NaruAgent", { enumerable: true, get: function () { return agent_js_1.NaruAgent; } });
@@ -66,3 +66,11 @@ var collector_js_1 = require("./tracing/collector.js");
 Object.defineProperty(exports, "TraceCollector", { enumerable: true, get: function () { return collector_js_1.TraceCollector; } });
 var jsonl_js_1 = require("./tracing/exporters/jsonl.js");
 Object.defineProperty(exports, "JSONLTraceExporter", { enumerable: true, get: function () { return jsonl_js_1.JSONLTraceExporter; } });
+// Orchestration
+var index_js_1 = require("./orchestration/index.js");
+Object.defineProperty(exports, "AgentOrchestrator", { enumerable: true, get: function () { return index_js_1.AgentOrchestrator; } });
+Object.defineProperty(exports, "DeterministicIntentResolver", { enumerable: true, get: function () { return index_js_1.DeterministicIntentResolver; } });
+Object.defineProperty(exports, "LLMFallbackIntentResolver", { enumerable: true, get: function () { return index_js_1.LLMFallbackIntentResolver; } });
+Object.defineProperty(exports, "InMemoryPendingStateManager", { enumerable: true, get: function () { return index_js_1.InMemoryPendingStateManager; } });
+Object.defineProperty(exports, "InMemorySessionStateStore", { enumerable: true, get: function () { return index_js_1.InMemorySessionStateStore; } });
+Object.defineProperty(exports, "classifyConfirmationDisposition", { enumerable: true, get: function () { return index_js_1.classifyConfirmationDisposition; } });
