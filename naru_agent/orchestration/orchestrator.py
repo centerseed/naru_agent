@@ -186,6 +186,7 @@ class AgentOrchestrator(Generic[T]):
                             content=content,
                             blocked=False,
                             usage={"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+                            timings={"total": timings.total},
                             session_id=session_id,
                             trace_id=trace_id,
                         )
@@ -225,7 +226,11 @@ class AgentOrchestrator(Generic[T]):
                         exec_result = executor.execute(
                             message=message,
                             intent=orchestration_intent,
-                            options={"user_id": user_id, "session_id": session_id},
+                            options={
+                                "user_id": user_id,
+                                "session_id": session_id,
+                                "session_state": cached_session_state,
+                            },
                         )
                         if exec_result is not None:
                             timings.direct_execution = time.monotonic() - exec_start
@@ -253,7 +258,12 @@ class AgentOrchestrator(Generic[T]):
                     selected_delegate = mapped
                     selected_delegate_name = str(orchestration_intent.object)
 
-            # Fetch session state if not yet done (for enrichment)
+            # Fetch session state if not yet done (for post-delegate save)
+            # NOTE: JS version injects sessionState into enrichedOptions passed
+            # to the delegate. Python's AgentChatDelegate Protocol has a fixed
+            # signature (message, user_id, session_id) matching NaruAgent.chat(),
+            # so session state cannot be forwarded as a parameter. Delegates that
+            # need session state should read from the store directly.
             if self._config.session_state_store and session_id and not session_state_fetched:
                 cached_session_state = self._config.session_state_store.get(session_id)
                 session_state_fetched = True

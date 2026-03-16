@@ -100,6 +100,48 @@ const agent = new NaruAgent({
 const result = await agent.chat("台北天氣如何？", "session-1");
 ```
 
+### Agent Orchestration（Python）
+
+```python
+import re
+from naru_agent import (
+    AgentOrchestrator,
+    AgentOrchestratorConfig,
+    DeterministicIntentResolver,
+    DeterministicPattern,
+    OrchestratorIntent,
+    InMemoryPendingStateManager,
+)
+
+# 單一 agent — 零開銷 passthrough
+simple = AgentOrchestrator(AgentOrchestratorConfig(delegate=my_agent))
+
+# 多 agent 路由 — intent 決定哪個 agent 處理
+orchestrator = AgentOrchestrator(AgentOrchestratorConfig(
+    delegate=general_agent,
+    delegates={
+        "task_capture": task_agent,
+        "calendar_query": cal_agent,
+    },
+    intent_resolver=DeterministicIntentResolver([
+        DeterministicPattern(
+            pattern=re.compile(r"記一下|待辦"),
+            intent=OrchestratorIntent(object="task_capture", confidence=1.0),
+        ),
+        DeterministicPattern(
+            pattern=re.compile(r"行事曆|會議"),
+            intent=OrchestratorIntent(object="calendar_query", confidence=1.0),
+        ),
+    ]),
+    pending_state_manager=InMemoryPendingStateManager(),
+))
+
+result = orchestrator.chat("記一下買牛奶", session_id="s1")
+# → task_agent 處理，不經過 general_agent
+# result.decision_trace.phase_reached == "delegate"
+# result.decision_trace.delegate_used == "task_capture"
+```
+
 ### Agent Orchestration（TypeScript）
 
 ```typescript
@@ -128,8 +170,8 @@ const orchestrator = new AgentOrchestrator({
 
 const result = await orchestrator.chat("記一下買牛奶", { sessionId: "s1" });
 // → taskAgent 處理，不經過 generalAgent
-// result.trace.phaseReached === "delegate"
-// result.trace.delegateUsed === "taskAgent"
+// result.decisionTrace.phaseReached === "delegate"
+// result.decisionTrace.delegateUsed === "task_capture"
 ```
 
 ---
@@ -152,9 +194,9 @@ const result = await orchestrator.chat("記一下買牛奶", { sessionId: "s1" }
 - **Tracing** — 完整執行鏈路記錄 + JSONL 導出
 - **Streaming** — async generator yield `StreamEvent`
 
-### AgentOrchestrator（JS，開發中）
+### AgentOrchestrator（Python + JS）
 
-可選的協作層，將多個 NaruAgent 組合為路由系統。
+可選的協作層，將多個 NaruAgent 組合為路由系統。Python 和 TypeScript 雙版本已完成。
 
 **4 階段路由：**
 
@@ -176,12 +218,21 @@ const result = await orchestrator.chat("記一下買牛奶", { sessionId: "s1" }
 | `InMemoryPendingStateManager` | 多步驟確認狀態管理 |
 | `InMemorySessionStateStore` | 實體追蹤（指代消解） |
 
-**TypeScript Generics：** 所有 orchestration 類別支援自訂 intent 型別。
+**泛型支援：**
+
+```python
+# Python — TypeVar + Generic
+from naru_agent import AgentOrchestrator, AgentOrchestratorConfig, DeterministicIntentResolver
+
+MyIntent = str  # "task_capture" | "calendar_query" | ...
+orchestrator: AgentOrchestrator[MyIntent] = AgentOrchestrator(AgentOrchestratorConfig(...))
+```
 
 ```typescript
+// TypeScript — Generics
 type MyIntent = GenericIntentObject | "task_capture" | "calendar_query";
 const orchestrator = new AgentOrchestrator<MyIntent>({ ... });
-// result.intent 自動推導為 IntentResult<MyIntent>
+// result.orchestrationIntent?.object 型別為 MyIntent
 ```
 
 ---
@@ -231,7 +282,16 @@ naru_agent/
 ├── intent/                     # BaseIntentClassifier + LLM + ToolCalling
 ├── tool_selection/             # BaseToolSelector + Embedding
 ├── compression/                # ContextCompressor + SummaryStore
-└── tracing/                    # Trace + Span + Collector + JSONL Exporter
+├── tracing/                    # Trace + Span + Collector + JSONL Exporter
+└── orchestration/              # AgentOrchestrator（4-phase routing）
+    ├── orchestrator.py         #   主類 + AgentChatDelegate Protocol
+    ├── intent.py               #   Deterministic + LLMFallback
+    ├── executor.py             #   BaseDirectExecutor
+    ├── channel.py              #   ChannelAdapter
+    ├── pending.py              #   PendingStateManager
+    ├── session_state.py        #   AgentSessionState
+    ├── trace.py                #   AgentDecisionTrace
+    └── result.py               #   OrchestrationResult
 ```
 
 ## TypeScript 目錄結構
@@ -243,7 +303,7 @@ js/src/
 ├── tools/                      # BaseTool + tool() factory
 ├── skills/                     # BaseSkill + skill() factory + Registry
 ├── decision/                   # LLMStructuredClassifier + ToolPlanner
-├── orchestration/              # AgentOrchestrator（開發中）
+├── orchestration/              # AgentOrchestrator（4-phase routing）
 │   ├── orchestrator.ts         #   主類
 │   ├── intent.ts               #   Deterministic + LLMFallback
 │   ├── executor.ts             #   BaseDirectExecutor

@@ -24,10 +24,12 @@ class PendingConfirmation:
 class OrchestrationResult(NaruResult):
     """Extends NaruResult with orchestration-specific fields.
 
-    All new fields are optional or have reasonable defaults so existing
-    NaruResult consumers continue to work (backward compatibility).
+    ``decision_trace`` is typed as ``| None`` due to dataclass inheritance
+    constraints (parent has defaults → children must too), but it is
+    **always set** by ``AgentOrchestrator._wrap_result()`` and will never
+    be ``None`` at runtime.
     """
 
-    decision_trace: AgentDecisionTrace | None = None  # type: ignore[assignment]
+    decision_trace: AgentDecisionTrace | None = None  # type: ignore[assignment]  # always set at runtime
     pending_confirmation: PendingConfirmation | None = None
     orchestration_intent: OrchestratorIntent | None = None  # type: ignore[type-arg]
