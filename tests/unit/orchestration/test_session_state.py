@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import time
+from unittest.mock import MagicMock
 
 import pytest
 
+from naru_agent.agent import NaruResult
+from naru_agent.orchestration.orchestrator import AgentOrchestrator, AgentOrchestratorConfig
 from naru_agent.orchestration.session_state import (
     AgentSessionState,
     InMemorySessionStateStore,
@@ -57,3 +60,46 @@ class TestInMemorySessionStateStore:
         state = AgentSessionState(session_id="s1", metadata={"user_lang": "zh"})
         store.save("s1", state)
         assert store.get("s1").metadata["user_lang"] == "zh"
+
+
+class TestOrchestratorSessionStateSave:
+    """@ac9 — Orchestrator saves session state after delegate response."""
+
+    def test_session_state_saved_after_delegate_response(self):
+        """Verify orchestrator.chat() persists session state to store."""
+        store = InMemorySessionStateStore()
+        delegate = MagicMock()
+        delegate.chat.return_value = NaruResult(
+            content="Hello!",
+            blocked=False,
+            session_id="sess-1",
+        )
+
+        config = AgentOrchestratorConfig(
+            delegate=delegate,
+            session_state_store=store,
+        )
+        orch = AgentOrchestrator(config)
+        orch.chat("hello", session_id="sess-1")
+
+        saved = store.get("sess-1")
+        assert saved is not None
+        assert saved.session_id == "sess-1"
+        assert saved.last_presented_entities == []
+        assert saved.updated_at > 0
+
+    def test_session_state_not_saved_without_session_id(self):
+        """No session state save when session_id is not provided."""
+        store = InMemorySessionStateStore()
+        delegate = MagicMock()
+        delegate.chat.return_value = NaruResult(content="Hi", blocked=False)
+
+        config = AgentOrchestratorConfig(
+            delegate=delegate,
+            session_state_store=store,
+        )
+        orch = AgentOrchestrator(config)
+        orch.chat("hello")
+
+        # No session_id means no state should be saved
+        assert store.get("default") is None

@@ -174,9 +174,8 @@ class AgentOrchestrator(Generic[T]):
                     )
                     disposition = classifier(message)
 
-                    self._config.pending_state_manager.clear_pending(session_id)
-
                     if disposition in ("confirm", "reject"):
+                        self._config.pending_state_manager.clear_pending(session_id)
                         timings.total = time.monotonic() - start_time
                         content = (
                             f"Confirmed: {pending.type}"
@@ -200,7 +199,8 @@ class AgentOrchestrator(Generic[T]):
                         self._fire_hook(self._get_hook("after_message"), result)
                         return result
 
-                    # override — pending already cleared above, continue normal flow
+                    # override — clear pending, continue normal flow
+                    self._config.pending_state_manager.clear_pending(session_id)
 
             # === Phase 1: Intent Resolution ===
             if self._config.intent_resolver:
