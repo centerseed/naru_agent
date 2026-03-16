@@ -127,6 +127,65 @@ __all__ = [
 ]
 
 try:
+    from naru_agent.orchestration import (
+        AgentChatDelegate,
+        AgentOrchestrator,
+        AgentOrchestratorConfig,
+        AgentDecisionTrace,
+        AgentSessionState,
+        BaseDirectExecutor,
+        BaseIntentResolver,
+        BasePendingStateManager,
+        BaseSessionStateStore,
+        ChannelAdapter,
+        ChannelMessage,
+        DeterministicIntentResolver,
+        DeterministicPattern,
+        InMemoryPendingStateManager,
+        InMemorySessionStateStore,
+        IntentResolveInput,
+        LifecycleHooks,
+        LLMFallbackIntentResolver,
+        OrchestrationPhase,
+        OrchestrationResult,
+        OrchestrationTimings,
+        OrchestratorIntent,
+        PendingConfirmation,
+        PendingState,
+        classify_confirmation_disposition,
+    )
+
+    __all__ += [
+        "AgentChatDelegate",
+        "AgentOrchestrator",
+        "AgentOrchestratorConfig",
+        "AgentDecisionTrace",
+        "AgentSessionState",
+        "BaseDirectExecutor",
+        "BaseIntentResolver",
+        "BasePendingStateManager",
+        "BaseSessionStateStore",
+        "ChannelAdapter",
+        "ChannelMessage",
+        "DeterministicIntentResolver",
+        "DeterministicPattern",
+        "InMemoryPendingStateManager",
+        "InMemorySessionStateStore",
+        "IntentResolveInput",
+        "LifecycleHooks",
+        "LLMFallbackIntentResolver",
+        "OrchestrationPhase",
+        "OrchestrationResult",
+        "OrchestrationTimings",
+        "OrchestratorIntent",
+        "PendingConfirmation",
+        "PendingState",
+        "classify_confirmation_disposition",
+    ]
+except ImportError:
+    pass
+
+try:
     from naru_agent.memory.mem0_manager import Mem0MemoryManager
 
     __all__.append("Mem0MemoryManager")

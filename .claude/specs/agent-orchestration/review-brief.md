@@ -1,119 +1,99 @@
-# Agent Orchestration — Review Brief
+# Review Brief: agent-orchestration/python-port
 
-## Implementation Approach Summary
+## Implementation Approach
 
-Implemented the full `AgentOrchestrator` system as a new `js/src/orchestration/` module. The orchestrator wraps any `AgentChatDelegate` (duck-typed interface — NaruAgent satisfies it structurally) and adds a 4-phase routing pipeline:
+移植 JS `js/src/orchestration/` 模組到 Python，保持 1:1 邏輯對應，同時適配 Python 慣例。
 
-- **Phase 0**: Pending confirmation — checks `pendingStateManager` before processing; classifies user message disposition (confirm/reject/override)
-- **Phase 1**: Intent resolution — calls `intentResolver.resolve()` if configured; supports `DeterministicIntentResolver` (fast regex pattern matching) and `LLMFallbackIntentResolver` (deterministic + LLM fallback chain)
-- **Phase 2**: Direct execution — tries `directExecutors[]` in order; skips delegate LLM if an executor handles the intent
-- **Phase 3**: Delegate routing — selects from `delegates` map by `intent.object` or falls back to default `delegate`
+### 架構決策
 
-Key design decisions:
-- `OrchestrationResult extends NaruResult` — preserving full backward compatibility. The NaruResult `trace` (tracing system Trace) is preserved; orchestration trace is in `decisionTrace: AgentDecisionTrace`
-- Renamed orchestration intent type to `OrchestratorIntent<T>` to avoid name collision with the existing `IntentResult` from `types.ts` (which has `needsKnowledge/needsTools/raw` shape)
-- Orchestration-resolved intent exposed as `orchestrationIntent` on `OrchestrationResult`
-- TypeScript generics throughout: `AgentOrchestrator<T>`, `DeterministicIntentResolver<T>`, `BaseDirectExecutor<T>`, `OrchestratorIntent<T>`
+1. **同步 API** — 所有方法皆同步，與 `NaruAgent.chat()` 一致
+2. **Protocol (PEP 544)** — `AgentChatDelegate` 使用 `Protocol`，NaruAgent 自動滿足（structural subtyping）
+3. **dataclass 繼承** — `OrchestrationResult(NaruResult)` 用 dataclass field 擴展
+4. **ABC** — `BaseDirectExecutor`, `BasePendingStateManager`, `BaseSessionStateStore` 用 ABC 強制實作
+5. **`@runtime_checkable` Protocol** — `ChannelAdapter` 可做 `isinstance` 檢查
+6. **snake_case** — 全部 Python 命名（`phase_reached`, `intent_resolved`, `direct_executor_used` 等）
+7. **`time.monotonic()`** — 所有 timing 計算（秒，非毫秒）
+8. **`uuid.uuid4()`** — 每次呼叫產生唯一 trace_id
+9. **`TYPE_CHECKING` guard** — trace.py 用 `if TYPE_CHECKING` 引用 intent 類型，避免循環 import
 
-## Reference Implementation Used
+### 4-Phase 路由邏輯
 
-- `js/src/intent/llm-classifier.ts` — pattern for classifier classes
-- `js/src/skills/base.ts` — pattern for interface + factory function style
-- `js/src/agent.test.ts` — test patterns (describe/it, vi.fn() mocks, mock LanguageModel shape)
-- `js/src/session/` — InMemory store pattern
+```
+Phase 0: pending_state_manager + session_id → confirm/reject/override
+Phase 1: intent_resolver → OrchestratorIntent
+Phase 2: direct_executors[].can_handle() → execute() or fallthrough
+Phase 3: delegates dict 路由 or default delegate
+```
 
-## Naming Conventions Followed
-
-- Files: `kebab-case.ts` (e.g., `session-state.ts`, `orchestrator.ts`)
-- Classes: `PascalCase` (e.g., `AgentOrchestrator`, `DeterministicIntentResolver`)
-- Interfaces: `PascalCase` with `Base` prefix for abstract (e.g., `BasePendingStateManager`)
-- InMemory implementations: `InMemory` prefix (e.g., `InMemoryPendingStateManager`)
-- Test files: `kebab-case.test.ts`
-- Test naming: `it("should <expected> when <condition>")`
-- Exports: named exports only, no default exports
+---
 
 ## AC Status
 
-- [x] AC1: AgentChatDelegate interface — NaruAgent structurally satisfies it; AgentOrchestrator is nestable
-- [x] AC2: Minimum single-agent passthrough — delegate.chat() called with same args; returns OrchestrationResult with all NaruResult fields; trace.phaseReached = "delegate"
-- [x] AC3: DeterministicIntentResolver — first-match pattern, returns unknown on no match
-- [x] AC4: LLMFallbackIntentResolver — skips LLM when deterministic matches; calls LLM on unknown
-- [x] AC5: DirectExecutor fast path — executor.execute() called; delegate skipped; fallthrough on null return
-- [x] AC6: PendingState confirmation flow — Phase 0 intercepts; clears pending; phaseReached = "pending_confirmation"
-- [x] AC7: Confirmation disposition — classifyConfirmationDisposition() classifies confirm/reject/override
-- [x] AC8: ChannelAdapter message transformation — processChannel() calls parseIncoming → chat → formatOutgoing
-- [x] AC9: AgentSessionState entity tracking — session state enriched into options for delegate; InMemorySessionStateStore provided
-- [x] AC10: AgentDecisionTrace completeness — traceId, phaseReached, intentResolved, timings, directExecutorUsed, delegateUsed all present
-- [x] AC11: Generic intent types — DeterministicIntentResolver<MyIntent>, AgentOrchestrator<MyIntent>, delegates map key typed
-- [x] AC12: Intent-to-delegate routing — delegates map routes by intent.object; unknown falls back to default delegate; trace.delegateUsed set
-- [x] AC13: Lifecycle hooks — beforeMessage/afterMessage/onError all fire; hook errors do not affect main flow
-- [x] AC14: OrchestrationResult backward compat — all NaruResult fields preserved; new fields are additions only
+- [x] @ac1  — AgentChatDelegate Protocol 相容性（test_delegate.py, 4 tests）
+- [x] @ac2  — 單一 agent 零開銷 passthrough（test_orchestrator.py, 6 tests）
+- [x] @ac3  — DeterministicIntentResolver（test_intent.py, 4 tests）
+- [x] @ac4  — LLMFallbackIntentResolver（test_intent.py, 4 tests）
+- [x] @ac5  — DirectExecutor 快速路徑（test_executor.py, 5 tests）
+- [x] @ac6  — PendingState 確認流程（test_pending.py, 6 tests）
+- [x] @ac7  — PendingState 確認判定 CJK + 英文 regex（test_pending.py, 17 tests）
+- [x] @ac8  — ChannelAdapter 訊息轉換（test_channel.py, 6 tests）
+- [x] @ac9  — Session state entity tracking（test_session_state.py, 7 tests）
+- [x] @ac10 — AgentDecisionTrace 完整性（test_orchestrator.py, 4 tests）
+- [x] @ac11 — Generic typing 驗證（test_types.py, 6 tests）
+- [x] @ac12 — Intent-to-delegate routing（test_orchestrator.py, 3 tests）
+- [x] @ac13 — Lifecycle hooks（test_lifecycle.py, 6 tests）
+- [x] @ac14 — OrchestrationResult 向後相容（test_result.py, 6 tests）
+
+---
 
 ## Changed Files
 
-### Created
-- `js/src/orchestration/orchestrator.ts` — AgentOrchestrator main class + AgentChatDelegate interface
-- `js/src/orchestration/intent.ts` — OrchestratorIntent<T>, DeterministicIntentResolver, LLMFallbackIntentResolver
-- `js/src/orchestration/executor.ts` — BaseDirectExecutor<T> interface
-- `js/src/orchestration/channel.ts` — ChannelAdapter<TIn, TOut> interface
-- `js/src/orchestration/pending.ts` — InMemoryPendingStateManager, classifyConfirmationDisposition
-- `js/src/orchestration/session-state.ts` — InMemorySessionStateStore, AgentSessionState
-- `js/src/orchestration/trace.ts` — AgentDecisionTrace type
-- `js/src/orchestration/result.ts` — OrchestrationResult type
-- `js/src/orchestration/index.ts` — barrel export
-- `js/tests/orchestration/orchestrator.test.ts` — AC1, AC2, AC10, AC12
-- `js/tests/orchestration/intent.test.ts` — AC3, AC4
-- `js/tests/orchestration/executor.test.ts` — AC5
-- `js/tests/orchestration/pending.test.ts` — AC6, AC7
-- `js/tests/orchestration/session-state.test.ts` — AC9
-- `js/tests/orchestration/channel.test.ts` — AC8
-- `js/tests/orchestration/lifecycle.test.ts` — AC13
-- `js/tests/orchestration/result.test.ts` — AC14
-- `js/tests/orchestration/delegate.test.ts` — AC1
-- `js/tests/orchestration/types.test.ts` — AC11
+### 新建檔案
 
-### Modified
-- `js/src/index.ts` — added orchestration module re-exports
-- `js/vitest.config.ts` — added `tests/**/*.test.ts` to include pattern
+| File | 說明 |
+|------|------|
+| `naru_agent/orchestration/__init__.py` | barrel export |
+| `naru_agent/orchestration/orchestrator.py` | AgentOrchestrator + AgentChatDelegate + LifecycleHooks + AgentOrchestratorConfig |
+| `naru_agent/orchestration/intent.py` | OrchestratorIntent, BaseIntentResolver, DeterministicIntentResolver, LLMFallbackIntentResolver |
+| `naru_agent/orchestration/executor.py` | BaseDirectExecutor (ABC) |
+| `naru_agent/orchestration/channel.py` | ChannelAdapter (Protocol), ChannelMessage |
+| `naru_agent/orchestration/pending.py` | PendingState, BasePendingStateManager, InMemoryPendingStateManager, classify_confirmation_disposition |
+| `naru_agent/orchestration/session_state.py` | AgentSessionState, BaseSessionStateStore, InMemorySessionStateStore |
+| `naru_agent/orchestration/trace.py` | AgentDecisionTrace, OrchestrationPhase, OrchestrationTimings |
+| `naru_agent/orchestration/result.py` | OrchestrationResult, PendingConfirmation |
+| `tests/unit/orchestration/__init__.py` | test package |
+| `tests/unit/orchestration/test_delegate.py` | @ac1 (4 tests) |
+| `tests/unit/orchestration/test_result.py` | @ac14 (6 tests) |
+| `tests/unit/orchestration/test_orchestrator.py` | @ac2, @ac10, @ac12 (13 tests) |
+| `tests/unit/orchestration/test_intent.py` | @ac3, @ac4 (8 tests) |
+| `tests/unit/orchestration/test_executor.py` | @ac5 (5 tests) |
+| `tests/unit/orchestration/test_pending.py` | @ac6, @ac7 (12 tests + parametrize) |
+| `tests/unit/orchestration/test_session_state.py` | @ac9 (7 tests) |
+| `tests/unit/orchestration/test_channel.py` | @ac8 (6 tests) |
+| `tests/unit/orchestration/test_lifecycle.py` | @ac13 (6 tests) |
+| `tests/unit/orchestration/test_types.py` | @ac11 (6 tests) |
 
-### Not Modified (as required)
-- `js/src/agent.ts` — untouched
-- `js/src/tools/base.ts` — untouched
-- `js/src/skills/*.ts` — untouched
+### 修改檔案
 
-## Verification Command Results
+| File | 說明 |
+|------|------|
+| `naru_agent/__init__.py` | 新增 orchestration exports（try/except 保護，保持向後相容） |
+
+---
+
+## Verification Results
 
 ```
-$ npm run lint && npx vitest run && npm run build
+============================= test session starts ==============================
+platform darwin -- Python 3.13.3, pytest-9.0.2, pluggy-1.6.0 -- /Users/wubaizong/接案/naru_agent/.venv/bin/python
+cachedir: .pytest_cache
+rootdir: /Users/wubaizong/接案/naru_agent/.claude/worktrees/agent-orchestration-python
+configfile: pyproject.toml
+plugins: anyio-4.12.1, mock-3.15.1, asyncio-1.3.0
 
-> naru-agent-js@0.1.1 lint
-> tsc --noEmit
-
- RUN  v2.1.9 /...agent-orchestration/js
-
- ✓ tests/orchestration/intent.test.ts (9 tests) 4ms
- ✓ tests/orchestration/executor.test.ts (4 tests) 3ms
- ✓ tests/orchestration/pending.test.ts (10 tests) 3ms
- ✓ tests/orchestration/session-state.test.ts (6 tests) 4ms
- ✓ tests/orchestration/orchestrator.test.ts (9 tests) 7ms
- ✓ tests/orchestration/types.test.ts (5 tests) 6ms
- ✓ tests/orchestration/channel.test.ts (4 tests) 3ms
- ✓ src/agent.test.ts (5 tests) 89ms
- ✓ src/memory/manager.test.ts (3 tests) 2ms
- ✓ tests/orchestration/result.test.ts (6 tests) 4ms
- ✓ tests/orchestration/lifecycle.test.ts (5 tests) 4ms
- ✓ src/skills/registry.test.ts (3 tests) 2ms
- ✓ tests/orchestration/delegate.test.ts (4 tests) 8ms
- ↓ tests/integration/test_capability_baseline.test.ts (16 tests | 16 skipped)
- ↓ tests/integration/test_quality_baseline.test.ts (16 tests | 16 skipped)
- ✓ src/guardrails/keyword.test.ts (3 tests) 1ms
- ✓ src/event-bus.test.ts (3 tests) 3ms
- ✓ src/tools/base.test.ts (2 tests) 1ms
-
- Test Files  16 passed | 2 skipped (18)
-      Tests  81 passed | 32 skipped (113)
-   Duration  1.05s
-
-> naru-agent-js@0.1.1 build
-> tsc && tsc -p tsconfig.cjs.json
+======================== 393 passed, 5 skipped in 1.14s ========================
 ```
+
+- 新增 orchestration 測試：**98 tests**（全部通過）
+- 既有測試：295 tests（全部通過，無 regression）
+- 5 skipped：pre-existing（`GEMINI_API_KEY` 未設定，與本 PR 無關）
