@@ -621,6 +621,8 @@ class NaruAgent:
                     if self.api_key:
                         kwargs["api_key"] = self.api_key
                     fallback_resp = litellm.completion(**kwargs)
+                    if not fallback_resp.choices:
+                        raise ValueError("Fallback LLM also returned empty choices")
                     response_text = fallback_resp.choices[0].message.content or ""
                 except Exception:
                     logger.warning("Fallback completion also failed")

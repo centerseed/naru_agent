@@ -102,6 +102,11 @@ class LiteLLMProvider(BaseLLM):
             params["tools"] = tools
 
         response = litellm.completion(**params)
+        if not response.choices:
+            raise ValueError(
+                f"LLM returned empty choices list (possible safety filter or high load). "
+                f"Model: {self.model_id}"
+            )
         choice = response.choices[0]
         message = choice.message
 
@@ -209,5 +214,10 @@ class LiteLLMProvider(BaseLLM):
             params["api_base"] = self.api_base
 
         response = litellm.completion(**params)
+        if not response.choices:
+            raise ValueError(
+                f"LLM returned empty choices list (possible safety filter or high load). "
+                f"Model: {self.model_id}"
+            )
         content = response.choices[0].message.content
         return response_schema.model_validate_json(content)
