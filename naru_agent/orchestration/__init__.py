@@ -2,6 +2,8 @@
 
 from naru_agent.orchestration.channel import ChannelAdapter, ChannelMessage
 from naru_agent.orchestration.executor import BaseDirectExecutor
+from naru_agent.orchestration.fanout import AgentFanout
+from naru_agent.orchestration.handoff import AgentHandoffLoop
 from naru_agent.orchestration.intent import (
     BaseIntentResolver,
     DeterministicIntentResolver,
@@ -16,6 +18,7 @@ from naru_agent.orchestration.orchestrator import (
     AgentOrchestratorConfig,
     LifecycleHooks,
 )
+from naru_agent.orchestration.pipeline import AgentPipeline
 from naru_agent.orchestration.pending import (
     BasePendingStateManager,
     ConfirmationDisposition,
@@ -41,6 +44,10 @@ __all__ = [
     "AgentOrchestrator",
     "AgentOrchestratorConfig",
     "LifecycleHooks",
+    # composable primitives
+    "AgentFanout",
+    "AgentHandoffLoop",
+    "AgentPipeline",
     # intent
     "BaseIntentResolver",
     "DeterministicIntentResolver",

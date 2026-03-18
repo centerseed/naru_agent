@@ -87,7 +87,14 @@ class NaruAgent {
             const stored = await this.config.sessionStore.get(sessionId);
             if (stored) {
                 const limit = this.config.numHistoryMessages;
-                history = limit ? stored.slice(-limit) : stored;
+                if (limit) {
+                    // Cut on pair boundaries (user+assistant) to avoid orphaned messages
+                    const pairCount = Math.floor(limit / 2);
+                    history = stored.slice(-(pairCount * 2));
+                }
+                else {
+                    history = stored;
+                }
             }
         }
         // === 4. LLM Call ===
@@ -126,7 +133,21 @@ class NaruAgent {
                     anthropic: { cacheControl: true },
                 } : undefined,
             });
+            // Some models (e.g. Gemini) return empty result.text when tool calls are the last step.
+            // Fall back to last step with non-empty text.
             content = result.text || "";
+            if (!content && result.steps?.length) {
+                for (let i = result.steps.length - 1; i >= 0; i--) {
+                    const stepText = result.steps[i].text;
+                    if (stepText) {
+                        content = stepText;
+                        break;
+                    }
+                }
+            }
+            if (!content) {
+                content = FALLBACK_RESPONSE;
+            }
             // Extract tool calls from all steps
             for (const step of result.steps ?? []) {
                 for (const tc of step.toolCalls ?? []) {
@@ -163,10 +184,15 @@ class NaruAgent {
             traceId: traceId ?? null,
         });
         // === 7. Background Tasks ===
+        // Truncate assistant message before storing if historyAssistantMaxChars is set.
+        const maxChars = this.config.historyAssistantMaxChars;
+        const storedAssistant = maxChars && content.length > maxChars
+            ? content.slice(0, maxChars) + "…"
+            : content;
         const updatedHistory = [
             ...history,
             { role: "user", content: message },
-            { role: "assistant", content },
+            { role: "assistant", content: storedAssistant },
         ];
         if (this.config.sessionStore && sessionId) {
             this.config.sessionStore.save(sessionId, updatedHistory).catch(() => { });
@@ -368,7 +394,13 @@ class NaruAgent {
             const stored = await this.config.sessionStore.get(sessionId);
             if (stored) {
                 const limit = this.config.numHistoryMessages;
-                history = limit ? stored.slice(-limit) : stored;
+                if (limit) {
+                    const pairCount = Math.floor(limit / 2);
+                    history = stored.slice(-(pairCount * 2));
+                }
+                else {
+                    history = stored;
+                }
             }
         }
         const vercelTools = prefetched.activeTools.length > 0

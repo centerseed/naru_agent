@@ -77,6 +77,15 @@ class Agent(BaseModel):
 
 
 @dataclass
+class HandoffRequest:
+    """Request to hand off the conversation to another agent."""
+
+    target: str  # delegate name (key in delegates map)
+    message: str | None = None  # if set, overrides the original message
+    reason: str = ""  # why the handoff occurred (for tracing)
+
+
+@dataclass
 class NaruResult:
     """Result returned by NaruAgent.chat()."""
 
@@ -89,6 +98,7 @@ class NaruResult:
     session_id: str | None = None
     trace_id: str | None = None
     trace: Trace | None = None
+    handoff: HandoffRequest | None = None
 
 
 # ---------------------------------------------------------------------------

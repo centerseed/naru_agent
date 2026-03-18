@@ -1,11 +1,11 @@
-# Verification Result: agent-orchestration
+# 驗證結果：agent-orchestration
 
-| Suite | Result | Passed | Failed | First Error (if any) |
+| 套件 | 結果 | 通過數 | 失敗數 | 首個錯誤（如有）|
 |-------|--------|--------|--------|----------------------|
 | JS lint (`tsc --noEmit`) | PASS | - | 0 | - |
 | JS unit (`vitest run`) | PASS | 81 | 0 | - |
 | JS build (`tsc && tsc -p tsconfig.cjs.json`) | PASS | - | 0 | - |
 
-Exit codes: all 0
+結束碼：全部 0
 
-Integration tests: 32 skipped (by design — require external services)
+整合測試：32 個已略過（設計如此 — 需要外部服務）

@@ -18,6 +18,12 @@ export function normalizeUsage(
   return { promptTokens: p, completionTokens: c, totalTokens: usage?.totalTokens ?? p + c };
 }
 
+export interface HandoffRequest {
+  target: string;
+  message?: string;
+  reason?: string;
+}
+
 export interface NaruResult {
   content: string;
   blocked: boolean;
@@ -28,6 +34,7 @@ export interface NaruResult {
   sessionId: string | null;
   traceId: string | null;
   trace: import("./tracing/trace.js").Trace | null;
+  handoff?: HandoffRequest | null;
 }
 
 export interface IntentResult {
@@ -74,6 +81,8 @@ export interface NaruAgentConfig {
   // Session
   sessionStore?: import("./session/base.js").BaseSessionStore;
   numHistoryMessages?: number;
+  /** Max characters to store per assistant message in history. Omit to store full content. */
+  historyAssistantMaxChars?: number;
 
   // Compression
   contextCompression?: boolean;

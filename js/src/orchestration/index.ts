@@ -2,6 +2,11 @@
 export { AgentOrchestrator } from "./orchestrator.js";
 export type { AgentChatDelegate, AgentOrchestratorConfig, LifecycleHooks } from "./orchestrator.js";
 
+// Composable primitives
+export { AgentPipeline } from "./pipeline.js";
+export { AgentFanout } from "./fanout.js";
+export { AgentHandoffLoop } from "./handoff.js";
+
 // Intent
 export {
   DeterministicIntentResolver,

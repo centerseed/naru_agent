@@ -6,6 +6,7 @@ export type {
   ChatOptions,
   TokenUsage,
   IntentResult,
+  HandoffRequest,
   EmbedFn,
   ModelMessage,
 } from "./types.js";

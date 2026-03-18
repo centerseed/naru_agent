@@ -9,3 +9,8 @@ build/
 memory_db/
 chroma_db/
 examples/test_memory_db/
+
+# POC client instances (not tracked; only the template is)
+poc/*/
+!poc/.gitkeep
+poc-template/template/node_modules/

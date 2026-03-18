@@ -13,6 +13,9 @@ NaruAgent.chat("Hello")              AgentOrchestrator
   （單一 agent，零開銷）                ├─ intentResolver（快速路徑 + LLM fallback）
                                       ├─ directExecutors[]（跳過 LLM 的快速路徑）
                                       ├─ delegates Map（intent → 專屬 agent）
+                                      │   ├─ AgentPipeline（串接處理）
+                                      │   ├─ AgentFanout（並行派工 + 合併）
+                                      │   └─ AgentHandoffLoop（agent 間轉接）
                                       ├─ pendingStateManager（多步驟確認）
                                       ├─ sessionStateStore（實體追蹤）
                                       └─ channelAdapter（LINE/Slack/API）
@@ -142,6 +145,51 @@ result = orchestrator.chat("記一下買牛奶", session_id="s1")
 # result.decision_trace.delegate_used == "task_capture"
 ```
 
+### Composable Primitives（Python）
+
+三個可組合的 primitive，都滿足 `AgentChatDelegate` 介面，可直接當 delegate 插入 orchestrator。
+
+```python
+from naru_agent import AgentPipeline, AgentFanout, AgentHandoffLoop
+
+# Sequential Pipeline — A 的輸出自動變 B 的輸入
+pipeline = AgentPipeline([
+    research_agent,   # 先蒐集資訊
+    summary_agent,    # 再摘要
+    translate_agent,  # 最後翻譯
+])
+result = pipeline.chat("量子計算的最新進展")
+
+# Parallel Fan-out — 同時派工給多個 agent，合併結果
+fanout = AgentFanout(
+    agents=[search_agent, database_agent, api_agent],
+    merge=lambda results: NaruResult(
+        content="\n".join(r.content for r in results)
+    ),
+)
+result = fanout.chat("找出所有相關資料")
+
+# Agent Handoff — agent 間轉接，max_handoffs 防止無限迴圈
+handoff = AgentHandoffLoop(
+    agents={"triage": triage_agent, "billing": billing_agent, "tech": tech_agent},
+    entry="triage",
+    max_handoffs=5,
+)
+result = handoff.chat("我的帳單有問題")
+
+# 任意組合 — Pipeline 裡放 Fanout，整體當 delegate
+orchestrator = AgentOrchestrator(AgentOrchestratorConfig(
+    delegate=general_agent,
+    delegates={
+        "deep_research": AgentPipeline([
+            AgentFanout([search_agent, database_agent]),  # 並行蒐集
+            summary_agent,                                # 串接摘要
+        ]),
+    },
+    intent_resolver=resolver,
+))
+```
+
 ### Agent Orchestration（TypeScript）
 
 ```typescript
@@ -172,6 +220,38 @@ const result = await orchestrator.chat("記一下買牛奶", { sessionId: "s1" }
 // → taskAgent 處理，不經過 generalAgent
 // result.decisionTrace.phaseReached === "delegate"
 // result.decisionTrace.delegateUsed === "task_capture"
+```
+
+### Composable Primitives（TypeScript）
+
+```typescript
+import { AgentPipeline, AgentFanout, AgentHandoffLoop } from "naru-agent-js";
+
+// Sequential Pipeline
+const pipeline = new AgentPipeline([researchAgent, summaryAgent, translateAgent]);
+
+// Parallel Fan-out
+const fanout = new AgentFanout([searchAgent, dbAgent, apiAgent], {
+  merge: (results) => ({ ...results[0], content: results.map(r => r.content).join("\n") }),
+});
+
+// Agent Handoff
+const handoff = new AgentHandoffLoop(
+  new Map([["triage", triageAgent], ["billing", billingAgent], ["tech", techAgent]]),
+  "triage",
+);
+
+// 任意組合 — 都滿足 AgentChatDelegate，可直接當 delegate
+const orchestrator = new AgentOrchestrator({
+  delegate: generalAgent,
+  delegates: new Map([
+    ["deep_research", new AgentPipeline([
+      new AgentFanout([searchAgent, dbAgent]),
+      summaryAgent,
+    ])],
+  ]),
+  intentResolver: resolver,
+});
 ```
 
 ---
@@ -217,6 +297,16 @@ const result = await orchestrator.chat("記一下買牛奶", { sessionId: "s1" }
 | `ChannelAdapter<TIn, TOut>` | channel 抽象（LINE/Slack/API） |
 | `InMemoryPendingStateManager` | 多步驟確認狀態管理 |
 | `InMemorySessionStateStore` | 實體追蹤（指代消解） |
+
+**Composable Primitives：**
+
+三個獨立的組合元件，都滿足 `AgentChatDelegate` 介面，可作為 delegate 插入 orchestrator 或巢狀組合。
+
+| 元件 | 用途 |
+|------|------|
+| `AgentPipeline` | 串接多個 agent — A 的輸出自動變 B 的輸入 |
+| `AgentFanout` | 並行派工給多個 agent，合併結果（Python 用 ThreadPoolExecutor，JS 用 Promise.all） |
+| `AgentHandoffLoop` | agent 間轉接鏈，`max_handoffs` 防止無限迴圈，透過 `NaruResult.handoff` 觸發 |
 
 **泛型支援：**
 
@@ -287,6 +377,9 @@ naru_agent/
     ├── orchestrator.py         #   主類 + AgentChatDelegate Protocol
     ├── intent.py               #   Deterministic + LLMFallback
     ├── executor.py             #   BaseDirectExecutor
+    ├── pipeline.py             #   AgentPipeline（串接處理）
+    ├── fanout.py               #   AgentFanout（並行派工）
+    ├── handoff.py              #   AgentHandoffLoop（agent 轉接）
     ├── channel.py              #   ChannelAdapter
     ├── pending.py              #   PendingStateManager
     ├── session_state.py        #   AgentSessionState
@@ -307,6 +400,9 @@ js/src/
 │   ├── orchestrator.ts         #   主類
 │   ├── intent.ts               #   Deterministic + LLMFallback
 │   ├── executor.ts             #   BaseDirectExecutor
+│   ├── pipeline.ts             #   AgentPipeline（串接處理）
+│   ├── fanout.ts               #   AgentFanout（並行派工）
+│   ├── handoff.ts              #   AgentHandoffLoop（agent 轉接）
 │   ├── channel.ts              #   ChannelAdapter
 │   ├── pending.ts              #   PendingStateManager
 │   ├── session-state.ts        #   AgentSessionState

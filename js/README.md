@@ -24,6 +24,9 @@ npm install @ai-sdk/anthropic
 │ Phase 1: Intent Resolution（確定性 + LLM 分類）          │
 │ Phase 2: Direct Execution（高信心度跳過 LLM）            │
 │ Phase 3: Delegate（路由到對應的 NaruAgent）               │
+│          ├─ AgentPipeline（串接處理）                     │
+│          ├─ AgentFanout（並行派工 + 合併）                │
+│          └─ AgentHandoffLoop（agent 間轉接）             │
 └─────────────────────────┬───────────────────────────────┘
                           │
 ┌─────────────────────────▼───────────────────────────────┐
@@ -88,8 +91,59 @@ const orchestrator = new AgentOrchestrator({
 
 const result = await orchestrator.chat("記一下明天要買牛奶", { sessionId: "s1" });
 // → taskAgent 處理此訊息
-// result.trace.delegateUsed === "taskAgent"
-// result.trace.phaseReached === "delegate"
+// result.decisionTrace.delegateUsed === "taskAgent"
+// result.decisionTrace.phaseReached === "delegate"
+```
+
+### Composable Primitives
+
+三個可組合的 primitive，都滿足 `AgentChatDelegate` 介面，可直接當 delegate 插入 orchestrator 或巢狀組合。
+
+```typescript
+import { AgentPipeline, AgentFanout, AgentHandoffLoop } from "naru-agent-js";
+
+// Sequential Pipeline — A 的輸出自動變 B 的輸入
+const pipeline = new AgentPipeline([
+  researchAgent,   // 先蒐集資訊
+  summaryAgent,    // 再摘要
+  translateAgent,  // 最後翻譯
+]);
+const result = await pipeline.chat("量子計算的最新進展");
+
+// Parallel Fan-out — 同時派工給多個 agent，合併結果（Promise.all）
+const fanout = new AgentFanout(
+  [searchAgent, dbAgent, apiAgent],
+  {
+    merge: (results) => ({
+      ...results[0],
+      content: results.map(r => r.content).join("\n"),
+    }),
+  },
+);
+
+// Agent Handoff — agent 間轉接鏈，maxHandoffs 防止無限迴圈
+// agent 透過 NaruResult.handoff 欄位觸發轉接
+const handoff = new AgentHandoffLoop(
+  new Map([
+    ["triage", triageAgent],
+    ["billing", billingAgent],
+    ["tech", techAgent],
+  ]),
+  "triage",  // entry agent
+  5,         // maxHandoffs
+);
+
+// 任意組合 — Pipeline 裡放 Fanout，整體當 delegate
+const orchestrator = new AgentOrchestrator({
+  delegate: generalAgent,
+  delegates: new Map([
+    ["deep_research", new AgentPipeline([
+      new AgentFanout([searchAgent, dbAgent]),  // 並行蒐集
+      summaryAgent,                             // 串接摘要
+    ])],
+  ]),
+  intentResolver: resolver,
+});
 ```
 
 ### 最小 Orchestrator（零開銷）
@@ -168,10 +222,10 @@ const agent = new NaruAgent({ model, tools: [weatherTool] });
 ### 記憶（Memory）
 
 ```typescript
-import { MemoryManager, ChromaMemoryStore } from "naru-agent-js";
+import { MemoryManager, InMemoryMemoryStore } from "naru-agent-js";
 
 const memory = new MemoryManager({
-  store: new ChromaMemoryStore({ collectionName: "user-memory" }),
+  store: new InMemoryMemoryStore(),
   model: myModel,
 });
 
@@ -219,7 +273,7 @@ import { KeywordGuardrail } from "naru-agent-js";
 
 const agent = new NaruAgent({
   model,
-  guardrails: [new KeywordGuardrail({ blocklist: ["spam", "abuse"] })],
+  guardrails: [new KeywordGuardrail({ blockedPatterns: ["spam", "abuse"] })],
 });
 ```
 
@@ -265,10 +319,10 @@ const agent = new NaruAgent({
 ### 追蹤（Tracing）
 
 ```typescript
-import { TraceCollector, JsonlTraceExporter } from "naru-agent-js";
+import { TraceCollector, JSONLTraceExporter } from "naru-agent-js";
 
 const tracer = new TraceCollector({
-  exporter: new JsonlTraceExporter({ path: "./traces.jsonl" }),
+  exporter: new JSONLTraceExporter({ path: "./traces.jsonl" }),
 });
 
 const agent = new NaruAgent({ model, traceCollector: tracer });
@@ -276,7 +330,7 @@ const agent = new NaruAgent({ model, traceCollector: tracer });
 
 ---
 
-## Orchestration API（開發中）
+## Orchestration API
 
 ### AgentOrchestrator
 
@@ -312,6 +366,25 @@ const orchestrator = new AgentOrchestrator<MyIntentType>({
 });
 ```
 
+### Composable Primitives API
+
+| 元件 | 說明 | 建構參數 |
+|------|------|----------|
+| `AgentPipeline` | 串接多個 agent，A → B → C | `stages: AgentChatDelegate[]`, `name?: string` |
+| `AgentFanout` | 並行派工 + 合併（`Promise.all`） | `agents: AgentChatDelegate[]`, `{ merge?, name? }` |
+| `AgentHandoffLoop` | agent 間轉接鏈 | `agents: Map<string, AgentChatDelegate>`, `entry: string`, `maxHandoffs?: number` |
+
+Handoff 透過 `NaruResult.handoff` 欄位觸發：
+
+```typescript
+// HandoffRequest 型別
+interface HandoffRequest {
+  target: string;     // delegate 名稱
+  message?: string;   // 覆蓋原始訊息（可選）
+  reason?: string;    // 轉接原因（用於追蹤）
+}
+```
+
 ### OrchestrationResult
 
 擴展 `NaruResult`，加上 orchestration 後設資料：
@@ -322,8 +395,8 @@ const orchestrator = new AgentOrchestrator<MyIntentType>({
 | `blocked` | `boolean` | 是否被護欄攔截（繼承自 NaruResult） |
 | `usage` | `TokenUsage` | Token 用量（繼承自 NaruResult） |
 | `toolCalls` | `string[]` | 使用的工具（繼承自 NaruResult） |
-| `intent` | `IntentResult<T> \| null` | 解析出的意圖 |
-| `trace` | `AgentDecisionTrace` | 完整決策追蹤含各階段耗時 |
+| `orchestrationIntent` | `OrchestratorIntent<T> \| null` | 解析出的意圖 |
+| `decisionTrace` | `AgentDecisionTrace` | 完整決策追蹤含各階段耗時 |
 | `pendingConfirmation` | `PendingState \| null` | 等待使用者確認 |
 | `sessionId` | `string \| null` | Session 識別碼 |
 
@@ -366,7 +439,14 @@ const result = await orchestrator.processChannel(rawLineWebhookEvent);
 
 ## 更新日誌
 
-### 0.2.0（開發中）
+### 0.3.0
+- **AgentPipeline** — 串接多個 agent，A 的輸出自動變 B 的輸入
+- **AgentFanout** — 並行派工給多個 agent，`Promise.all` + 可自訂 merge 策略
+- **AgentHandoffLoop** — agent 間轉接鏈，`maxHandoffs` 安全上限防止無限迴圈
+- **HandoffRequest** — `NaruResult` 新增 `handoff` 欄位，支援 agent 主動觸發轉接
+- 三個 primitive 都滿足 `AgentChatDelegate`，可巢狀組合並直接插入 orchestrator
+
+### 0.2.0
 - **AgentOrchestrator** — 4 階段路由：pending → intent → direct execute → delegate
 - **DeterministicIntentResolver** — 零成本 keyword/regex 意圖匹配
 - **LLMFallbackIntentResolver** — 確定性 + LLM fallback 組合
