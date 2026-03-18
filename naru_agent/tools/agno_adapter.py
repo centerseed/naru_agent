@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import logging
+import threading
 from typing import Any
 
 from naru_agent.tools.base import BaseTool
@@ -11,17 +12,26 @@ from naru_agent.tools.base import BaseTool
 logger = logging.getLogger(__name__)
 
 
-def _build_wrapper(naru_tool: BaseTool):
+def _build_wrapper(naru_tool: BaseTool, semaphore: threading.Semaphore | None = None):
     """Build a plain function that wraps a BaseTool.run() call.
 
     The wrapper has the correct signature and docstring so that
     Agno can register it as a tool.
+
+    If *semaphore* is provided, each tool call acquires it before executing
+    and releases it afterward, limiting parallel tool execution.
     """
     schema = naru_tool.args_schema
     if schema is None:
         # No args — simple wrapper
         def wrapper() -> str:
-            return naru_tool.run()
+            if semaphore:
+                semaphore.acquire()
+            try:
+                return naru_tool.run()
+            finally:
+                if semaphore:
+                    semaphore.release()
 
         wrapper.__name__ = naru_tool.name
         wrapper.__doc__ = naru_tool.description
@@ -46,7 +56,13 @@ def _build_wrapper(naru_tool: BaseTool):
         )
 
     def wrapper(**kwargs: Any) -> str:
-        return naru_tool.run(**kwargs)
+        if semaphore:
+            semaphore.acquire()
+        try:
+            return naru_tool.run(**kwargs)
+        finally:
+            if semaphore:
+                semaphore.release()
 
     wrapper.__name__ = naru_tool.name
     wrapper.__doc__ = naru_tool.description
@@ -68,15 +84,24 @@ class NaruToolkit:
         from agno.agent import Agent
         toolkit = NaruToolkit(naru_tools)
         agent = Agent(tools=[toolkit], ...)
+
+    Pass *semaphore* to limit how many tools execute in parallel::
+
+        sem = threading.Semaphore(2)
+        toolkit = NaruToolkit(naru_tools, semaphore=sem)
     """
 
-    def __init__(self, tools: list[BaseTool]) -> None:
+    def __init__(
+        self,
+        tools: list[BaseTool],
+        semaphore: threading.Semaphore | None = None,
+    ) -> None:
         from agno.tools.toolkit import Toolkit
 
         self._toolkit = Toolkit(name="naru_tools")
         for t in tools:
             try:
-                fn = _build_wrapper(t)
+                fn = _build_wrapper(t, semaphore=semaphore)
                 self._toolkit.register(fn)
             except Exception:
                 logger.exception("Failed to register tool '%s'", t.name)

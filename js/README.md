@@ -219,6 +219,20 @@ const weatherTool = tool({
 const agent = new NaruAgent({ model, tools: [weatherTool] });
 ```
 
+#### 限制並行工具數量
+
+LLM 在單一步驟內可能同時呼叫多個工具。使用 `maxParallelTools` 限制同時執行數量，避免後端過載或超出 rate limit：
+
+```typescript
+const agent = new NaruAgent({
+  model,
+  tools: [toolA, toolB, toolC, toolD],
+  maxParallelTools: 2,  // 同時最多執行 2 個，其餘排隊等待
+});
+```
+
+預設不限制（全部並行）。
+
 ### 記憶（Memory）
 
 ```typescript
@@ -438,6 +452,9 @@ const result = await orchestrator.processChannel(rawLineWebhookEvent);
 所有 I/O 透過 Vercel AI SDK — 可在 Next.js API routes、Edge functions 和 serverless 環境中運作。
 
 ## 更新日誌
+
+### 0.3.1
+- **`maxParallelTools`** — 限制單一 LLM 步驟內同時執行的工具數量，以 Semaphore 實作，防止後端過載
 
 ### 0.3.0
 - **AgentPipeline** — 串接多個 agent，A 的輸出自動變 B 的輸入

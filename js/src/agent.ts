@@ -142,7 +142,9 @@ export class NaruAgent {
     const llmStart = Date.now();
 
     const vercelTools =
-      activeTools.length > 0 ? toVercelTools(activeTools) : undefined;
+      activeTools.length > 0
+        ? toVercelTools(activeTools, { maxParallelTools: this.config.maxParallelTools })
+        : undefined;
     const toolChoice =
       activeTools.length > 0
         ? this.resolveToolChoice({
@@ -514,7 +516,7 @@ export class NaruAgent {
 
     const vercelTools =
       prefetched.activeTools.length > 0
-        ? toVercelTools(prefetched.activeTools)
+        ? toVercelTools(prefetched.activeTools, { maxParallelTools: this.config.maxParallelTools })
         : undefined;
     const toolChoice =
       prefetched.activeTools.length > 0

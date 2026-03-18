@@ -67,6 +67,8 @@ export interface NaruAgentConfig {
 
   // LLM options
   toolCallLimit?: number;
+  /** Max number of tool calls executed in parallel within a single LLM step. Default: unlimited. */
+  maxParallelTools?: number;
   temperature?: number;
   prefetchTimeout?: number;
   toolChoice?: ToolChoice<Record<string, unknown>>;

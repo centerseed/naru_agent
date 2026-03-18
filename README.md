@@ -262,7 +262,7 @@ const orchestrator = new AgentOrchestrator({
 
 框架的核心 agent，可獨立使用或作為 `AgentOrchestrator` 的 delegate。
 
-- **Tools** — `@tool` decorator / `BaseTool` class，sync/async 皆可，多 tool calls 自動並行
+- **Tools** — `@tool` decorator / `BaseTool` class，sync/async 皆可，多 tool calls 自動並行；`max_parallel_tools` / `maxParallelTools` 可限制同時執行數量
 - **Skills** — 根據觸發詞動態注入 prompt 和額外 tools，`KeywordSkillSelector` / `EmbeddingSkillSelector`
 - **Memory** — LLM 驅動的事實萃取與和解，per-user scope。本地：`MemoryManager` + ChromaDB；生產：`Mem0MemoryManager` + pgvector（三層記憶）
 - **Knowledge（RAG）** — `ChromaKnowledgeStore`（向量搜索 + Contextual Retrieval）、`GraphKnowledgeStore`（知識圖譜）、`HybridKnowledgeStore`（混合）

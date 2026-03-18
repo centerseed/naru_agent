@@ -166,6 +166,7 @@ class NaruAgent:
         guardrails: list[BaseGuardrail] | None = None,
         # Agno options
         tool_call_limit: int = 10,
+        max_parallel_tools: int | None = None,
         markdown: bool = False,
         temperature: float = 0.7,
         prefetch_timeout: float = 10.0,
@@ -211,6 +212,7 @@ class NaruAgent:
         self.memory = memory
         self.guardrails = guardrails or []
         self.tool_call_limit = tool_call_limit
+        self.max_parallel_tools = max_parallel_tools
         self.markdown = markdown
         self.temperature = temperature
         self.prefetch_timeout = prefetch_timeout
@@ -733,8 +735,20 @@ class NaruAgent:
 
         always_tools are always appended regardless of needs_tools,
         allowing write-side tools to bypass the tool_calling_classifier.
+
+        If max_parallel_tools is set, a shared threading.Semaphore is created
+        and passed to all NaruToolkit instances so that at most that many tool
+        calls run concurrently within a single agent turn.
         """
+        import threading
+
         from naru_agent.tools.agno_adapter import NaruToolkit
+
+        semaphore = (
+            threading.Semaphore(self.max_parallel_tools)
+            if self.max_parallel_tools
+            else None
+        )
 
         agno_tools: list[Any] = []
 
@@ -746,10 +760,10 @@ class NaruAgent:
                 else:
                     agno_tools.append(t)
             if naru_tools:
-                agno_tools.append(NaruToolkit(naru_tools).toolkit)
+                agno_tools.append(NaruToolkit(naru_tools, semaphore=semaphore).toolkit)
 
         if extra_tools:
-            agno_tools.append(NaruToolkit(extra_tools).toolkit)
+            agno_tools.append(NaruToolkit(extra_tools, semaphore=semaphore).toolkit)
 
         if self._always_tools:
             always_naru: list[BaseTool] = []
@@ -759,7 +773,7 @@ class NaruAgent:
                 else:
                     agno_tools.append(t)
             if always_naru:
-                agno_tools.append(NaruToolkit(always_naru).toolkit)
+                agno_tools.append(NaruToolkit(always_naru, semaphore=semaphore).toolkit)
 
         return agno_tools
 

@@ -43,10 +43,12 @@ class Runner:
         agent: Agent,
         event_bus: EventBus | None = None,
         tool_selector: BaseToolSelector | None = None,
+        max_parallel_tools: int | None = None,
     ):
         self.agent = agent
         self.events = event_bus or EventBus()
         self.tool_selector = tool_selector
+        self.max_parallel_tools = max_parallel_tools
 
     # ------------------------------------------------------------------
     # Sync run (backward compatible, now with parallel tool execution)
@@ -159,7 +161,7 @@ class Runner:
                 used_tool_names.add(tc["name"])
 
             results: dict[str, str] = {}
-            with ThreadPoolExecutor() as executor:
+            with ThreadPoolExecutor(max_workers=self.max_parallel_tools) as executor:
                 futures = {
                     executor.submit(self._execute_tool_sync, tc): tc
                     for tc in response.tool_calls
@@ -334,7 +336,16 @@ class Runner:
                 )
 
             # Parallel async tool execution
-            tasks = [self._execute_tool_async(tc) for tc in tool_calls]
+            if self.max_parallel_tools:
+                sem = asyncio.Semaphore(self.max_parallel_tools)
+
+                async def _run_with_sem(tc):
+                    async with sem:
+                        return await self._execute_tool_async(tc)
+
+                tasks = [_run_with_sem(tc) for tc in tool_calls]
+            else:
+                tasks = [self._execute_tool_async(tc) for tc in tool_calls]
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
             # Handle any unexpected exceptions from gather
