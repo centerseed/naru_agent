@@ -12,7 +12,11 @@ from naru_agent.tools.base import BaseTool
 logger = logging.getLogger(__name__)
 
 
-def _build_wrapper(naru_tool: BaseTool, semaphore: threading.Semaphore | None = None):
+def _build_wrapper(
+    naru_tool: BaseTool,
+    semaphore: threading.Semaphore | None = None,
+    call_cache: dict[str, str] | None = None,
+):
     """Build a plain function that wraps a BaseTool.run() call.
 
     The wrapper has the correct signature and docstring so that
@@ -20,18 +24,30 @@ def _build_wrapper(naru_tool: BaseTool, semaphore: threading.Semaphore | None = 
 
     If *semaphore* is provided, each tool call acquires it before executing
     and releases it afterward, limiting parallel tool execution.
+
+    If *call_cache* is provided, identical calls (same tool + same args) within
+    the same turn are deduplicated — the cached result is returned immediately
+    without re-executing the tool.  Pass a fresh ``{}`` per turn to scope the
+    cache to a single ReAct loop iteration (TOOL_STORM prevention).
     """
     schema = naru_tool.args_schema
     if schema is None:
         # No args — simple wrapper
         def wrapper() -> str:
+            cache_key = naru_tool.name
+            if call_cache is not None and cache_key in call_cache:
+                logger.debug("tool_dedup hit: %s", cache_key)
+                return call_cache[cache_key]
             if semaphore:
                 semaphore.acquire()
             try:
-                return naru_tool.run()
+                result = naru_tool.run()
             finally:
                 if semaphore:
                     semaphore.release()
+            if call_cache is not None:
+                call_cache[cache_key] = result
+            return result
 
         wrapper.__name__ = naru_tool.name
         wrapper.__doc__ = naru_tool.description
@@ -56,13 +72,20 @@ def _build_wrapper(naru_tool: BaseTool, semaphore: threading.Semaphore | None = 
         )
 
     def wrapper(**kwargs: Any) -> str:
+        cache_key = f"{naru_tool.name}:{sorted(kwargs.items())}"
+        if call_cache is not None and cache_key in call_cache:
+            logger.debug("tool_dedup hit: %s", cache_key)
+            return call_cache[cache_key]
         if semaphore:
             semaphore.acquire()
         try:
-            return naru_tool.run(**kwargs)
+            result = naru_tool.run(**kwargs)
         finally:
             if semaphore:
                 semaphore.release()
+        if call_cache is not None:
+            call_cache[cache_key] = result
+        return result
 
     wrapper.__name__ = naru_tool.name
     wrapper.__doc__ = naru_tool.description
@@ -89,19 +112,26 @@ class NaruToolkit:
 
         sem = threading.Semaphore(2)
         toolkit = NaruToolkit(naru_tools, semaphore=sem)
+
+    Set ``deduplicate_calls=False`` to disable per-turn deduplication (e.g. for
+    side-effectful tools that intentionally repeat the same call).
     """
 
     def __init__(
         self,
         tools: list[BaseTool],
         semaphore: threading.Semaphore | None = None,
+        deduplicate_calls: bool = True,
     ) -> None:
         from agno.tools.toolkit import Toolkit
 
         self._toolkit = Toolkit(name="naru_tools")
+        # Shared cache for this toolkit instance — scoped to one turn because
+        # NaruToolkit is created fresh per turn in AgnoAgent.
+        call_cache: dict[str, str] | None = {} if deduplicate_calls else None
         for t in tools:
             try:
-                fn = _build_wrapper(t, semaphore=semaphore)
+                fn = _build_wrapper(t, semaphore=semaphore, call_cache=call_cache)
                 self._toolkit.register(fn)
             except Exception:
                 logger.exception("Failed to register tool '%s'", t.name)
