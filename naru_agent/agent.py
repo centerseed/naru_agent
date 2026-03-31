@@ -707,7 +707,7 @@ class NaruAgent:
         """Return cached Agno LiteLLM model instance (thread-safe)."""
         with self._model_lock:
             if self._agno_model is None:
-                model_kwargs: dict[str, Any] = {"id": self.model_id}
+                model_kwargs: dict[str, Any] = {"id": self.model_id, "temperature": self.temperature}
                 if self.api_key:
                     model_kwargs["api_key"] = self.api_key
                 self._agno_model = AgnoLiteLLM(**model_kwargs)
