@@ -43,6 +43,8 @@ class BaseSkill(ABC):
     triggers: list[str]
     priority: int
     always_active: bool
+    trigger_conditions: list[str]
+    exclusion_conditions: list[str]
 
     def __init__(
         self,
@@ -51,12 +53,16 @@ class BaseSkill(ABC):
         triggers: list[str] | None = None,
         priority: int = 0,
         always_active: bool = False,
+        trigger_conditions: list[str] | None = None,
+        exclusion_conditions: list[str] | None = None,
     ):
         self.name = name
         self.description = description
         self.triggers = triggers or []
         self.priority = priority
         self.always_active = always_active
+        self.trigger_conditions = trigger_conditions or []
+        self.exclusion_conditions = exclusion_conditions or []
 
     @abstractmethod
     def run(self, message: str, context: SkillContext) -> SkillResult:
@@ -74,6 +80,8 @@ class FunctionSkill(BaseSkill):
         triggers: list[str] | None = None,
         priority: int = 0,
         always_active: bool = False,
+        trigger_conditions: list[str] | None = None,
+        exclusion_conditions: list[str] | None = None,
     ):
         super().__init__(
             name=name or func.__name__,
@@ -81,6 +89,8 @@ class FunctionSkill(BaseSkill):
             triggers=triggers,
             priority=priority,
             always_active=always_active,
+            trigger_conditions=trigger_conditions,
+            exclusion_conditions=exclusion_conditions,
         )
         self._func = func
 
@@ -100,6 +110,8 @@ def skill(
     triggers: list[str] | None = None,
     priority: int = 0,
     always_active: bool = False,
+    trigger_conditions: list[str] | None = None,
+    exclusion_conditions: list[str] | None = None,
 ) -> Callable:
     """Decorator to turn a function into a Skill.
 
@@ -118,6 +130,8 @@ def skill(
             triggers=triggers,
             priority=priority,
             always_active=always_active,
+            trigger_conditions=trigger_conditions,
+            exclusion_conditions=exclusion_conditions,
         )
 
     return decorator

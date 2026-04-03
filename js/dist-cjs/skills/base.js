@@ -12,6 +12,8 @@ function skill(config) {
         triggers: config.triggers ?? [],
         priority: config.priority ?? 0,
         alwaysActive: config.alwaysActive ?? false,
+        triggerConditions: config.triggerConditions ?? [],
+        exclusionConditions: config.exclusionConditions ?? [],
         run: config.run,
     };
 }

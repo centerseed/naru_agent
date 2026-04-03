@@ -11,7 +11,7 @@ from naru_agent.tracing import (
 from naru_agent.tools.base import BaseTool, tool
 from naru_agent.skills import BaseSkill, SkillContext, SkillResult
 from naru_agent.skills.base import skill
-from naru_agent.skills.selectors import BaseSkillSelector, KeywordSkillSelector
+from naru_agent.skills.selectors import BaseSkillSelector, KeywordSkillSelector, LLMSkillSelector
 from naru_agent.memory.manager import MemoryManager
 from naru_agent.guardrails.base import BaseGuardrail, GuardrailResult
 from naru_agent.events import EventBus
@@ -119,6 +119,7 @@ __all__ = [
     "skill",
     "BaseSkillSelector",
     "KeywordSkillSelector",
+    "LLMSkillSelector",
     # Compression
     "BaseSummaryStore",
     "CompressedSummary",

@@ -23,6 +23,8 @@ export interface BaseSkill {
   triggers: string[];
   priority: number;
   alwaysActive: boolean;
+  triggerConditions: string[];
+  exclusionConditions: string[];
   run: (message: string, context: SkillContext) => Promise<SkillResult>;
 }
 
@@ -32,6 +34,8 @@ export interface SkillConfig {
   triggers?: string[];
   priority?: number;
   alwaysActive?: boolean;
+  triggerConditions?: string[];
+  exclusionConditions?: string[];
   run: (message: string, context: SkillContext) => Promise<SkillResult>;
 }
 
@@ -45,6 +49,8 @@ export function skill(config: SkillConfig): BaseSkill {
     triggers: config.triggers ?? [],
     priority: config.priority ?? 0,
     alwaysActive: config.alwaysActive ?? false,
+    triggerConditions: config.triggerConditions ?? [],
+    exclusionConditions: config.exclusionConditions ?? [],
     run: config.run,
   };
 }

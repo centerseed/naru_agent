@@ -27,7 +27,7 @@ export type {
   SkillResult,
 } from "./skills/base.js";
 export { SkillRegistry } from "./skills/registry.js";
-export { KeywordSkillSelector, EmbeddingSkillSelector } from "./skills/selectors.js";
+export { KeywordSkillSelector, EmbeddingSkillSelector, LLMSkillSelector } from "./skills/selectors.js";
 export type { BaseSkillSelector } from "./skills/selectors.js";
 
 // Memory
