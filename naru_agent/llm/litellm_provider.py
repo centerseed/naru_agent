@@ -119,11 +119,20 @@ class LiteLLMProvider(BaseLLM):
                     "arguments": json.loads(tc.function.arguments),
                 })
 
+        usage = self._extract_usage(response.usage)
+        # Cloud Logging 結構化用量(供 audit-card-rizo / eval 用 gcloud 撈 Rizo+agent 成本;比接 BigQuery 輕)。
+        logger.info(
+            "rizo_llm_usage model=%s prompt_tokens=%s completion_tokens=%s total_tokens=%s",
+            self.model,
+            usage.get("prompt_tokens"),
+            usage.get("completion_tokens"),
+            usage.get("total_tokens"),
+        )
         return LLMResponse(
             content=message.content,
             tool_calls=tool_calls,
             raw=response,
-            usage=self._extract_usage(response.usage),
+            usage=usage,
         )
 
     async def chat_stream(
