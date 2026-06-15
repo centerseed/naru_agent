@@ -4,7 +4,7 @@ import logging
 import threading
 import time
 import weakref
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -382,8 +382,28 @@ class NaruAgent:
             t_key = time.perf_counter()
             try:
                 val = future.result(timeout=self.prefetch_timeout)
+            except FuturesTimeoutError:
+                # Sentinel: a timed-out prefetch silently drops its context (e.g. the
+                # verdict/HR block), leaving the LLM ungrounded -> it may fabricate.
+                # Structured so Cloud Logging can build a metric on
+                # jsonPayload.event_type="prefetch_timeout". Expected ~0 in healthy prod
+                # (context build is sub-second co-located); non-zero => GCP latency/outage.
+                logger.warning({
+                    "event_type": "prefetch_timeout",
+                    "prefetch_hook": key,
+                    "timeout_s": self.prefetch_timeout,
+                    "message": (f"Prefetch '{key}' timed out after {self.prefetch_timeout}s; "
+                                "context not injected (LLM ungrounded)"),
+                })
+                val = "" if key != "intent" else IntentResult(
+                    needs_knowledge=True, needs_tools=True, raw=""
+                )
             except Exception:
-                logger.warning("Prefetch '%s' failed", key)
+                logger.warning({
+                    "event_type": "prefetch_failed",
+                    "prefetch_hook": key,
+                    "message": f"Prefetch '{key}' failed",
+                }, exc_info=True)
                 val = "" if key != "intent" else IntentResult(
                     needs_knowledge=True, needs_tools=True, raw=""
                 )
