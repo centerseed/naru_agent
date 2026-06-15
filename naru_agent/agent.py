@@ -25,6 +25,14 @@ from naru_agent.tools.base import BaseTool
 
 logger = logging.getLogger(__name__)
 
+# Appended to the empty-content fallback so the model answers from the tool
+# results + injected context instead of echoing the user's question verbatim.
+_FALLBACK_ANSWER_DIRECTIVE = (
+    "請根據上面的工具結果與已提供的脈絡，直接用一段話回答我最初的問題。"
+    "不要重複或改寫我的問題；若某項資料查不到，就用脈絡裡已有的資訊誠實回答"
+    "（例如今天還沒有訓練紀錄就直說、並可提到今天計畫的課表），不要把問題丟回給我。"
+)
+
 
 # ---------------------------------------------------------------------------
 # Legacy Agent (kept for backward compatibility)
@@ -621,10 +629,16 @@ class NaruAgent:
 
                     # Reconstruct the full multi-turn context so the fallback
                     # model sees the structured tool call / result history
-                    # instead of a flattened text blob.
+                    # instead of a flattened text blob. Append an explicit
+                    # answer-now directive: without it, flash-lite sometimes
+                    # parrots the user's question back instead of synthesising
+                    # the tool results + injected context into an answer
+                    # (observed on data_query when tools returned "no data").
                     fallback_messages: list[dict[str, Any]] = [
                         {"role": "system", "content": "\n\n".join(dynamic_instructions)},
-                    ] + self._agno_messages_to_litellm(agno_result.messages)
+                    ] + self._agno_messages_to_litellm(agno_result.messages) + [
+                        {"role": "user", "content": _FALLBACK_ANSWER_DIRECTIVE},
+                    ]
                     kwargs: dict[str, Any] = {
                         "model": self.model_id,
                         "messages": fallback_messages,
