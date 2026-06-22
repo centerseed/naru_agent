@@ -31,12 +31,22 @@ T = TypeVar("T", bound=str)
 
 
 class AgentChatDelegate(Protocol):
-    """Any object with a chat() method.
+    """Any object with chat() / achat() methods.
 
-    NaruAgent satisfies this structurally (duck typing / PEP 544).
+    NaruAgent satisfies this structurally (duck typing / PEP 544). The sync chat()
+    feeds AgentOrchestrator.chat(); achat() feeds AgentOrchestrator.achat() (the
+    Paceriz single-event-loop path). Nested AgentOrchestrator exposes both too.
     """
 
     def chat(
+        self,
+        message: str,
+        user_id: str | None = None,
+        session_id: str | None = None,
+    ) -> NaruResult:
+        ...
+
+    async def achat(
         self,
         message: str,
         user_id: str | None = None,
@@ -277,6 +287,161 @@ class AgentOrchestrator(Generic[T]):
             timings.total = time.monotonic() - start_time
 
             # Update session state if applicable
+            if self._config.session_state_store and session_id and delegate_result.session_id:
+                new_state = AgentSessionState(
+                    session_id=session_id,
+                    last_presented_entities=cached_session_state.last_presented_entities
+                    if cached_session_state
+                    else [],
+                    metadata=cached_session_state.metadata if cached_session_state else {},
+                    updated_at=time.time(),
+                )
+                self._config.session_state_store.save(session_id, new_state)
+
+            result = self._wrap_result(
+                delegate_result,
+                trace_id=trace_id,
+                phase_reached="delegate",
+                orchestration_intent=orchestration_intent,
+                timings=timings,
+                delegate_used=selected_delegate_name,
+                override_session_id=session_id or delegate_result.session_id,
+            )
+            self._fire_hook(self._get_hook("after_message"), result)
+            return result
+
+        except Exception as exc:
+            self._fire_hook(self._get_hook("on_error"), exc)
+            raise
+
+    async def achat(
+        self,
+        message: str,
+        user_id: str | None = None,
+        session_id: str | None = None,
+    ) -> OrchestrationResult:
+        """Async twin of chat(): identical 4-phase routing, but Phase 3 awaits the
+        delegate's achat() (non-blocking under a single event loop). Phases 0-2
+        (pending confirmation, intent resolution, direct execution) stay synchronous
+        — they are fast in-process steps with no LLM I/O. The selected delegate MUST
+        expose achat() (NaruAgent / nested AgentOrchestrator do)."""
+        start_time = time.monotonic()
+        trace_id = str(uuid.uuid4())
+
+        timings = OrchestrationTimings()
+        orchestration_intent: OrchestratorIntent[T] | None = None
+
+        self._fire_hook(self._get_hook("before_message"), message, user_id, session_id)
+
+        cached_session_state: AgentSessionState | None = None
+        session_state_fetched = False
+
+        try:
+            # === Phase 0: Pending Confirmation ===
+            if self._config.pending_state_manager and session_id:
+                pending = self._config.pending_state_manager.get_pending(session_id)
+                if pending is not None:
+                    classifier = (
+                        self._config.confirmation_classifier
+                        or classify_confirmation_disposition
+                    )
+                    disposition = classifier(message)
+
+                    if disposition in ("confirm", "reject"):
+                        self._config.pending_state_manager.clear_pending(session_id)
+                        timings.total = time.monotonic() - start_time
+                        content = (
+                            f"Confirmed: {pending.type}"
+                            if disposition == "confirm"
+                            else f"Rejected: {pending.type}"
+                        )
+                        base_result = NaruResult(
+                            content=content,
+                            blocked=False,
+                            usage={"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+                            timings={"total": timings.total},
+                            session_id=session_id,
+                            trace_id=trace_id,
+                        )
+                        result = self._wrap_result(
+                            base_result,
+                            trace_id=trace_id,
+                            phase_reached="pending_confirmation",
+                            orchestration_intent=None,
+                            timings=timings,
+                        )
+                        self._fire_hook(self._get_hook("after_message"), result)
+                        return result
+
+                    self._config.pending_state_manager.clear_pending(session_id)
+
+            # === Phase 1: Intent Resolution ===
+            if self._config.intent_resolver:
+                intent_start = time.monotonic()
+                if self._config.session_state_store and session_id and not session_state_fetched:
+                    cached_session_state = self._config.session_state_store.get(session_id)
+                    session_state_fetched = True
+
+                orchestration_intent = self._config.intent_resolver.resolve(
+                    IntentResolveInput(
+                        message=message,
+                        session_state=cached_session_state,
+                    )
+                )
+                timings.intent_resolution = time.monotonic() - intent_start
+
+            # === Phase 2: Direct Execution ===
+            if self._config.direct_executors and orchestration_intent is not None:
+                exec_start = time.monotonic()
+                for executor in self._config.direct_executors:
+                    if executor.can_handle(orchestration_intent):
+                        exec_result = executor.execute(
+                            message=message,
+                            intent=orchestration_intent,
+                            options={
+                                "user_id": user_id,
+                                "session_id": session_id,
+                                "session_state": cached_session_state,
+                            },
+                        )
+                        if exec_result is not None:
+                            timings.direct_execution = time.monotonic() - exec_start
+                            timings.total = time.monotonic() - start_time
+
+                            result = self._wrap_result(
+                                exec_result,
+                                trace_id=trace_id,
+                                phase_reached="direct_execution",
+                                orchestration_intent=orchestration_intent,
+                                timings=timings,
+                                direct_executor_used=executor.name,
+                            )
+                            self._fire_hook(self._get_hook("after_message"), result)
+                            return result
+
+            # === Phase 3: Delegate Routing (async) ===
+            delegate_start = time.monotonic()
+            selected_delegate: AgentChatDelegate = self._config.delegate
+            selected_delegate_name = "default"
+
+            if orchestration_intent is not None and self._config.delegates:
+                mapped = self._config.delegates.get(orchestration_intent.object)  # type: ignore[arg-type]
+                if mapped is not None:
+                    selected_delegate = mapped
+                    selected_delegate_name = str(orchestration_intent.object)
+
+            if self._config.session_state_store and session_id and not session_state_fetched:
+                cached_session_state = self._config.session_state_store.get(session_id)
+                session_state_fetched = True
+
+            delegate_result = await selected_delegate.achat(
+                message,
+                user_id=user_id,
+                session_id=session_id,
+            )
+            timings.delegate = time.monotonic() - delegate_start
+            timings.total = time.monotonic() - start_time
+
             if self._config.session_state_store and session_id and delegate_result.session_id:
                 new_state = AgentSessionState(
                     session_id=session_id,

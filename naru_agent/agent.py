@@ -109,6 +109,25 @@ class NaruResult:
     handoff: HandoffRequest | None = None
 
 
+@dataclass
+class _RunPrep:
+    """Internal carrier between _prepare_run and the agno-run / finalize steps.
+
+    Lets the sync (chat) and async (achat) paths share one prefetch + finalize
+    pipeline while differing only in how the main agno turn and the empty-content
+    fallback are executed (thread-blocking vs await)."""
+
+    blocked_result: NaruResult | None = None
+    timings: dict[str, float] = field(default_factory=dict)
+    t0: float = 0.0
+    intent: IntentResult | None = None
+    dynamic_instructions: list[str] = field(default_factory=list)
+    skill_results: list = field(default_factory=list)
+    user_id: str | None = None
+    session_id: str | None = None
+    fallback_text: str = ""
+
+
 # ---------------------------------------------------------------------------
 # NaruAgent — Agno-powered orchestrator
 # ---------------------------------------------------------------------------
@@ -293,10 +312,10 @@ class NaruAgent:
         # Cached AgnoAgent — recreated only on first call; instructions/tools
         # are updated before each run. All persistent session state is stored
         # in self.db (Agno DB) via session_id, so reusing the agent object is
-        # safe. Concurrent chat() calls on the same NaruAgent are serialized
-        # by _agno_run_lock (LLM latency dwarfs lock overhead).
+        # safe. The Paceriz path serializes same-session turns one layer up via a
+        # per-session asyncio.Lock; the old cross-thread _agno_run_lock was removed
+        # with the move to a single-event-loop async path (achat).
         self._agno_agent: AgnoAgent | None = None
-        self._agno_run_lock = threading.Lock()
         # weakref.finalize runs on GC (short-lived agents) or process exit
         # (long-lived agents), avoiding atexit handler accumulation.
         weakref.finalize(
@@ -316,7 +335,7 @@ class NaruAgent:
         user_id: str | None = None,
         session_id: str | None = None,
     ) -> NaruResult:
-        """Send a message and get a response.
+        """Send a message and get a response (synchronous).
 
         Orchestration flow:
         1. Input guardrails
@@ -325,7 +344,49 @@ class NaruAgent:
         4. Run Agno Agent
         5. Output guardrails
         6. Background memory save
+
+        Kept for naru's own tests and any synchronous consumer. The Paceriz
+        request path uses achat() (single-event-loop, non-blocking).
         """
+        prep = self._prepare_run(message, user_id, session_id)
+        if prep.blocked_result is not None:
+            return prep.blocked_result
+        agno_result = self._run_agno_sync(message, prep)
+        return self._finalize_run(message, user_id, session_id, prep, agno_result)
+
+    async def achat(
+        self,
+        message: str,
+        user_id: str | None = None,
+        session_id: str | None = None,
+    ) -> NaruResult:
+        """Async twin of chat(): same prefetch/instruction-building, but the main
+        agno turn runs via Agent.arun (real async I/O — yields the event loop while
+        the upstream LLM is in flight) and the empty-content fallback goes through
+        the shared async LLM gateway. Single authoritative pipeline shared with
+        chat() via _prepare_run / _finalize_run (no logic duplicated)."""
+        prep = self._prepare_run(message, user_id, session_id)
+        if prep.blocked_result is not None:
+            return prep.blocked_result
+        agno_result = await self._run_agno_async(message, prep)
+        return self._finalize_run(message, user_id, session_id, prep, agno_result)
+
+    # ------------------------------------------------------------------
+    # Shared run pipeline (sync chat + async achat both use these)
+    # ------------------------------------------------------------------
+
+    def _prepare_run(
+        self,
+        message: str,
+        user_id: str | None,
+        session_id: str | None,
+    ) -> "_RunPrep":
+        """Phases 1-3: guardrails + parallel prefetch + instruction building.
+
+        Identical for sync and async paths. Returns a _RunPrep carrying everything
+        the agno run + finalize steps need. If an input guardrail blocks the turn,
+        _RunPrep.blocked_result is set (trace already exported) and the caller
+        returns it directly."""
         timings: dict[str, float] = {}
         t0 = time.perf_counter()
 
@@ -343,7 +404,7 @@ class NaruAgent:
                     session_id=session_id,
                 )
                 self._finish_and_export_trace(blocked_result)
-                return blocked_result
+                return _RunPrep(blocked_result=blocked_result)
 
         # 2. Parallel prefetch (two phases if intent classifier exists)
         t_prefetch = time.perf_counter()
@@ -541,71 +602,205 @@ class NaruAgent:
                 raw=intent.raw,
             )
 
-        # 5. Run Agno Agent
-        t_agent = time.perf_counter()
+        return _RunPrep(
+            timings=timings,
+            t0=t0,
+            intent=intent,
+            dynamic_instructions=dynamic_instructions,
+            skill_results=skill_results,
+            user_id=user_id,
+            session_id=session_id,
+        )
 
+    def _ensure_agno_agent(self, dynamic_instructions: list[str], intent, skill_results) -> None:
+        """Lazily build (once) and mutate the cached AgnoAgent for this turn.
+
+        Instructions/tools are per-turn; persistent session state lives in self.db
+        keyed by session_id, so reusing the agent object is safe."""
+        skill_extra_tools = [t for sr in skill_results for t in sr.extra_tools]
+        agno_tools = self._prepare_tools(intent.needs_tools, extra_tools=skill_extra_tools or None)
+        if self._agno_agent is None:
+            static_kwargs: dict[str, Any] = {
+                "model": self._get_agno_model(),
+                "markdown": self.markdown,
+                "tool_call_limit": self.tool_call_limit,
+            }
+            if self.db is not None:
+                static_kwargs["db"] = self.db
+                static_kwargs["add_history_to_context"] = self.add_history_to_context
+                if self.num_history_runs is not None:
+                    static_kwargs["num_history_runs"] = self.num_history_runs
+                if self.num_history_messages is not None:
+                    static_kwargs["num_history_messages"] = self.num_history_messages
+                if self.max_tool_calls_from_history is not None:
+                    static_kwargs["max_tool_calls_from_history"] = self.max_tool_calls_from_history
+            if self.compress_tool_results:
+                static_kwargs["compress_tool_results"] = True
+                if self.compression_manager is not None:
+                    static_kwargs["compression_manager"] = self.compression_manager
+            if self.enable_session_summaries:
+                static_kwargs["enable_session_summaries"] = True
+            self._agno_agent = AgnoAgent(**static_kwargs)
+
+        self._agno_agent.instructions = dynamic_instructions
+        self._agno_agent.tools = agno_tools if agno_tools else None
+
+    @staticmethod
+    def _run_kwargs(user_id: str | None, session_id: str | None) -> dict[str, Any]:
         run_kwargs: dict[str, Any] = {}
         if user_id is not None:
             run_kwargs["user_id"] = user_id
         if session_id is not None:
             run_kwargs["session_id"] = session_id
+        return run_kwargs
 
-        with self._agno_run_lock:
-            # 4. Prepare tools (inside lock — keeps tool preparation and agent
-            # mutation atomic, preventing fragile split if _prepare_tools evolves)
-            skill_extra_tools = [t for sr in skill_results for t in sr.extra_tools]
-            agno_tools = self._prepare_tools(intent.needs_tools, extra_tools=skill_extra_tools or None)
-            if self._agno_agent is None:
-                static_kwargs: dict[str, Any] = {
-                    "model": self._get_agno_model(),
-                    "markdown": self.markdown,
-                    "tool_call_limit": self.tool_call_limit,
-                }
-                if self.db is not None:
-                    static_kwargs["db"] = self.db
-                    static_kwargs["add_history_to_context"] = self.add_history_to_context
-                    if self.num_history_runs is not None:
-                        static_kwargs["num_history_runs"] = self.num_history_runs
-                    if self.num_history_messages is not None:
-                        static_kwargs["num_history_messages"] = self.num_history_messages
-                    if self.max_tool_calls_from_history is not None:
-                        static_kwargs["max_tool_calls_from_history"] = self.max_tool_calls_from_history
-                if self.compress_tool_results:
-                    static_kwargs["compress_tool_results"] = True
-                    if self.compression_manager is not None:
-                        static_kwargs["compression_manager"] = self.compression_manager
-                if self.enable_session_summaries:
-                    static_kwargs["enable_session_summaries"] = True
-                self._agno_agent = AgnoAgent(**static_kwargs)
+    def _emit_after_llm(self, agno_result, llm_latency_ms: float) -> None:
+        if not self.event_bus:
+            return
+        self.event_bus.emit("after_llm_call", {
+            "iteration": 0,
+            "model": self.model_id,
+            "has_tool_calls": bool(agno_result.messages and any(
+                hasattr(m, "tool_calls") and m.tool_calls
+                for m in agno_result.messages
+            )),
+            "response_content": agno_result.content or "",
+            "tool_calls": [],
+            "usage": {},
+            "latency_ms": llm_latency_ms,
+        })
 
-            self._agno_agent.instructions = dynamic_instructions
-            self._agno_agent.tools = agno_tools if agno_tools else None
+    def _run_agno_sync(self, message: str, prep: "_RunPrep"):
+        """Synchronous agno turn (naru's own tests / synchronous consumers).
 
-            if self.event_bus:
-                self.event_bus.emit("before_llm_call", {
-                    "iteration": 0,
-                    "message_count": len(dynamic_instructions) + 1,
-                })
+        The previous cross-thread _agno_run_lock is gone: the Paceriz request path
+        no longer calls this (it uses achat on a single event loop, serialized
+        per-session by an asyncio.Lock), and the remaining synchronous callers are
+        naru's single-threaded tests. Callers needing concurrent sync use on one
+        NaruAgent must serialize externally."""
+        t_agent = time.perf_counter()
+        run_kwargs = self._run_kwargs(prep.user_id, prep.session_id)
+        self._ensure_agno_agent(prep.dynamic_instructions, prep.intent, prep.skill_results)
+        if self.event_bus:
+            self.event_bus.emit("before_llm_call", {
+                "iteration": 0,
+                "message_count": len(prep.dynamic_instructions) + 1,
+            })
+        t_llm = time.perf_counter()
+        agno_result = self._agno_agent.run(message, **run_kwargs)
+        llm_latency_ms = (time.perf_counter() - t_llm) * 1000
+        self._emit_after_llm(agno_result, llm_latency_ms)
+        prep.timings["agent_run"] = time.perf_counter() - t_agent
+        prep.fallback_text = self._empty_content_fallback_sync(agno_result, prep.dynamic_instructions)
+        return agno_result
 
-            t_llm = time.perf_counter()
-            agno_result = self._agno_agent.run(message, **run_kwargs)
-            llm_latency_ms = (time.perf_counter() - t_llm) * 1000
+    async def _run_agno_async(self, message: str, prep: "_RunPrep"):
+        """Async agno turn via Agent.arun — yields the event loop while the upstream
+        LLM is in flight. No threading lock: under uvicorn --workers 1 the event loop
+        is single-threaded, and same-session serialization is enforced one layer up
+        by the per-session asyncio.Lock (orchestrator_service.chat). Concurrent achat()
+        across *different* sessions on one NaruAgent instance is not a Paceriz pattern
+        (each request builds fresh per-uid delegates), so agent-object mutation races
+        are not introduced here."""
+        t_agent = time.perf_counter()
+        run_kwargs = self._run_kwargs(prep.user_id, prep.session_id)
+        self._ensure_agno_agent(prep.dynamic_instructions, prep.intent, prep.skill_results)
+        if self.event_bus:
+            self.event_bus.emit("before_llm_call", {
+                "iteration": 0,
+                "message_count": len(prep.dynamic_instructions) + 1,
+            })
+        t_llm = time.perf_counter()
+        agno_result = await self._agno_agent.arun(message, **run_kwargs)
+        llm_latency_ms = (time.perf_counter() - t_llm) * 1000
+        self._emit_after_llm(agno_result, llm_latency_ms)
+        prep.timings["agent_run"] = time.perf_counter() - t_agent
+        prep.fallback_text = await self._empty_content_fallback_async(agno_result, prep.dynamic_instructions)
+        return agno_result
 
-            if self.event_bus:
-                self.event_bus.emit("after_llm_call", {
-                    "iteration": 0,
-                    "model": self.model_id,
-                    "has_tool_calls": bool(agno_result.messages and any(
-                        hasattr(m, "tool_calls") and m.tool_calls
-                        for m in agno_result.messages
-                    )),
-                    "response_content": agno_result.content or "",
-                    "tool_calls": [],
-                    "usage": {},
-                    "latency_ms": llm_latency_ms,
-                })
+    def _needs_empty_content_fallback(self, agno_result) -> bool:
+        if agno_result.content or not agno_result.messages:
+            return False
+        return any(
+            getattr(m, "role", "") == "tool" and getattr(m, "content", "")
+            for m in agno_result.messages
+        )
 
-        timings["agent_run"] = time.perf_counter() - t_agent
+    def _build_fallback_messages(self, agno_result, dynamic_instructions) -> list[dict[str, Any]]:
+        """Reconstruct the full multi-turn context so the fallback model sees the
+        structured tool call / result history instead of a flattened text blob.
+        Append an explicit answer-now directive: without it, flash-lite sometimes
+        parrots the user's question back instead of synthesising the tool results +
+        injected context into an answer (observed on data_query when tools returned
+        "no data")."""
+        return [
+            {"role": "system", "content": "\n\n".join(dynamic_instructions)},
+        ] + self._agno_messages_to_litellm(agno_result.messages) + [
+            {"role": "user", "content": _FALLBACK_ANSWER_DIRECTIVE},
+        ]
+
+    def _empty_content_fallback_sync(self, agno_result, dynamic_instructions) -> str:
+        """Sync empty-content fallback (legacy litellm.completion path). Returns ""
+        when no fallback is needed or it fails — _finalize_run then applies the safe
+        default reply."""
+        if not self._needs_empty_content_fallback(agno_result):
+            return ""
+        logger.info("Empty content after tool calls, falling back")
+        try:
+            import litellm
+            kwargs: dict[str, Any] = {
+                "model": self.model_id,
+                "messages": self._build_fallback_messages(agno_result, dynamic_instructions),
+                "temperature": self.temperature,
+            }
+            if self.api_key:
+                kwargs["api_key"] = self.api_key
+            fallback_resp = litellm.completion(**kwargs)
+            if not fallback_resp.choices:
+                raise ValueError("Fallback LLM also returned empty choices")
+            return fallback_resp.choices[0].message.content or ""
+        except Exception:
+            logger.warning("Fallback completion also failed")
+            return ""
+
+    async def _empty_content_fallback_async(self, agno_result, dynamic_instructions) -> str:
+        """Async empty-content fallback via the shared LLM gateway (non-blocking,
+        concurrency-capped). Mirrors _empty_content_fallback_sync."""
+        if not self._needs_empty_content_fallback(agno_result):
+            return ""
+        logger.info("Empty content after tool calls, falling back (async gateway)")
+        try:
+            from naru_agent.llm.async_gateway import llm_gateway
+            resp = await llm_gateway.acomplete(
+                self._build_fallback_messages(agno_result, dynamic_instructions),
+                model=self.model_id,
+                usage_type="empty_content_fallback",
+                user_id="",
+                timeout_s=30,
+                temperature=self.temperature,
+                api_key=self.api_key,
+            )
+            return resp.choices[0].message.content or ""
+        except Exception:
+            logger.warning("Async fallback completion also failed", exc_info=True)
+            return ""
+
+    def _finalize_run(
+        self,
+        message: str,
+        user_id: str | None,
+        session_id: str | None,
+        prep: "_RunPrep",
+        agno_result,
+    ) -> NaruResult:
+        """Phases after the agno turn: tool-call/usage extraction, empty-content
+        fallback (sync litellm — kept in scope per the async-loop task; a follow-up
+        moves it onto the gateway), output guardrails, background memory/compression,
+        trace export. Shared by chat() and achat()."""
+        timings = prep.timings
+        intent = prep.intent
+        dynamic_instructions = prep.dynamic_instructions
+        t0 = prep.t0
 
         # Extract tool calls
         tool_calls_made: list[str] = []
@@ -634,44 +829,10 @@ class NaruAgent:
                 "total": total_in + total_out,
             }
 
-        # Fallback: tool calls succeeded but content empty
-        response_text = agno_result.content or ""
-        if not response_text and agno_result.messages:
-            tool_results = [
-                getattr(m, "content", "")
-                for m in agno_result.messages
-                if getattr(m, "role", "") == "tool" and getattr(m, "content", "")
-            ]
-            if tool_results:
-                logger.info("Empty content after tool calls, falling back")
-                try:
-                    import litellm
-
-                    # Reconstruct the full multi-turn context so the fallback
-                    # model sees the structured tool call / result history
-                    # instead of a flattened text blob. Append an explicit
-                    # answer-now directive: without it, flash-lite sometimes
-                    # parrots the user's question back instead of synthesising
-                    # the tool results + injected context into an answer
-                    # (observed on data_query when tools returned "no data").
-                    fallback_messages: list[dict[str, Any]] = [
-                        {"role": "system", "content": "\n\n".join(dynamic_instructions)},
-                    ] + self._agno_messages_to_litellm(agno_result.messages) + [
-                        {"role": "user", "content": _FALLBACK_ANSWER_DIRECTIVE},
-                    ]
-                    kwargs: dict[str, Any] = {
-                        "model": self.model_id,
-                        "messages": fallback_messages,
-                        "temperature": self.temperature,
-                    }
-                    if self.api_key:
-                        kwargs["api_key"] = self.api_key
-                    fallback_resp = litellm.completion(**kwargs)
-                    if not fallback_resp.choices:
-                        raise ValueError("Fallback LLM also returned empty choices")
-                    response_text = fallback_resp.choices[0].message.content or ""
-                except Exception:
-                    logger.warning("Fallback completion also failed")
+        # Fallback: tool calls succeeded but content empty. The actual LLM fallback
+        # ran in the run-specific method (_run_agno_sync uses litellm.completion;
+        # _run_agno_async uses the async gateway) and its result is on prep.fallback_text.
+        response_text = agno_result.content or prep.fallback_text or ""
 
         if not response_text:
             response_text = "抱歉，我剛剛出了一點狀況，可以再說一次嗎？"
