@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import threading
 import time
@@ -365,7 +366,7 @@ class NaruAgent:
         the upstream LLM is in flight) and the empty-content fallback goes through
         the shared async LLM gateway. Single authoritative pipeline shared with
         chat() via _prepare_run / _finalize_run (no logic duplicated)."""
-        prep = self._prepare_run(message, user_id, session_id)
+        prep = await asyncio.to_thread(self._prepare_run, message, user_id, session_id)
         if prep.blocked_result is not None:
             return prep.blocked_result
         agno_result = await self._run_agno_async(message, prep)
