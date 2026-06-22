@@ -40,3 +40,18 @@ class BaseDirectExecutor(ABC, Generic[T]):
     ) -> OrchestrationResult | None:
         """Execute and return a result, or ``None`` to fallthrough."""
         ...
+
+    async def aexecute(
+        self,
+        *,
+        message: str,
+        intent: OrchestratorIntent[T],
+        options: dict | None = None,
+    ) -> OrchestrationResult | None:
+        """Async execution, used by the single-event-loop ``achat`` path.
+
+        Default delegates to the sync ``execute``. Executors whose work is itself
+        async (e.g. an LLM-backed cheap reply routed through the async gateway) MUST
+        override this so they never block the event loop with a synchronous LLM call.
+        """
+        return self.execute(message=message, intent=intent, options=options)

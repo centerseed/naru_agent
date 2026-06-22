@@ -395,7 +395,10 @@ class AgentOrchestrator(Generic[T]):
                 exec_start = time.monotonic()
                 for executor in self._config.direct_executors:
                     if executor.can_handle(orchestration_intent):
-                        exec_result = executor.execute(
+                        # async path: await aexecute so an LLM-backed executor (e.g. the
+                        # cheap-reply chitchat executor) runs on the async gateway and never
+                        # blocks the event loop. Default aexecute falls back to sync execute.
+                        exec_result = await executor.aexecute(
                             message=message,
                             intent=orchestration_intent,
                             options={
