@@ -7,6 +7,7 @@ from typing import Any
 
 import litellm
 
+from naru_agent.llm.async_gateway import llm_gateway
 from naru_agent.llm.base import BaseLLM, LLMResponse
 from naru_agent.streaming import StreamChunk
 
@@ -230,3 +231,63 @@ class LiteLLMProvider(BaseLLM):
             )
         content = response.choices[0].message.content
         return response_schema.model_validate_json(content)
+
+    async def achat(
+        self,
+        messages: list[dict[str, str]],
+        tools: list[dict] | None = None,
+        temperature: float | None = None,
+        *,
+        usage_type: str = "rizo_chat",
+        user_id: str = "",
+        timeout_s: float = 30.0,
+        **kwargs: Any,
+    ) -> LLMResponse:
+        """async 出口：走 AsyncLLMGateway（semaphore + 真取消），不阻塞 event loop。"""
+        if self._should_apply_cache():
+            messages = self._apply_cache_control(messages)
+        resp = await llm_gateway.acomplete(
+            messages,
+            model=self.model,
+            usage_type=usage_type,
+            user_id=user_id,
+            timeout_s=timeout_s,
+            tools=tools,
+            temperature=self.default_temperature if temperature is None else temperature,
+            api_key=self.api_key,
+        )
+        message = resp.choices[0].message
+        tool_calls = []
+        if message.tool_calls:
+            for tc in message.tool_calls:
+                tool_calls.append({
+                    "id": tc.id,
+                    "name": tc.function.name,
+                    "arguments": json.loads(tc.function.arguments),
+                })
+        return LLMResponse(
+            content=message.content,
+            tool_calls=tool_calls,
+            raw=resp,
+            usage=self._extract_usage(resp.usage),
+        )
+
+    async def achat_structured(
+        self,
+        messages: list[dict[str, str]],
+        response_schema: type,
+        temperature: float = 0.0,
+        *,
+        usage_type: str = "rizo_structured",
+        user_id: str = "",
+        timeout_s: float = 30.0,
+        **kwargs: Any,
+    ) -> Any:
+        """async 結構化出口：gateway 寬鬆 json_object 解析後，由 schema 驗證。"""
+        if self._should_apply_cache():
+            messages = self._apply_cache_control(messages)
+        data = await llm_gateway.acomplete_structured(
+            messages, model=self.model, usage_type=usage_type, user_id=user_id,
+            timeout_s=timeout_s, api_key=self.api_key,
+        )
+        return response_schema.model_validate(data)
