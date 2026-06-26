@@ -40,6 +40,18 @@ _MAX_TRANSIENT_RETRIES = 2
 # 重試才真的救得回(2026-06-22 真 prod key 壓測:短退避救回率低)。退避期間不佔 semaphore 名額。
 _TRANSIENT_BACKOFF_S = 2.0
 
+# 跨供應商 fallback:primary(通常 gemini)同 model transient 重試耗盡後,改打別家 model
+# 頂上(env 設定,逗號分隔;空=維持現狀、完全不跨家)。只在暫時性錯誤(503/429/連線重置…)
+# 觸發 —— 永久錯(400/schema)與硬 deadline(timeout/cancel)不觸發(換家也救不了或超時間預算)。
+# Gemini 全過載時(2026-06 prod 503 storm)Rizo 不再整條死在「系統忙線中」。
+# 每次呼叫即時讀 env,方便用 env flag 安全開關(key 未備好就維持空值=不啟用)。
+_FALLBACK_MODELS_ENV = "NARU_LLM_FALLBACK_MODELS"
+
+
+def _get_fallback_models() -> list[str]:
+    raw = os.getenv(_FALLBACK_MODELS_ENV, "")
+    return [m.strip() for m in raw.split(",") if m.strip()]
+
 
 def _is_transient_llm_error(exc: BaseException) -> bool:
     """上游暫時性錯誤（可短退避後重試），非永久性（400/401/schema）。"""
@@ -133,13 +145,40 @@ class AsyncLLMGateway:
 
     async def acomplete(self, messages, *, model, usage_type, user_id, timeout_s,
                         tools=None, temperature=None, response_format=None, api_key=None):
-        params = self._build_params(messages, model=model, tools=tools, temperature=temperature,
-                                    response_format=response_format, api_key=api_key)
-        resp = await self._call(params, timeout_s)
-        if not resp.choices:
-            raise ValueError(f"LLM empty choices (safety filter / load). model={model}")
-        self._log_usage(model, usage_type, user_id, resp)
-        return resp
+        # primary model 先試;同 model transient 重試(_call 內)耗盡且為暫時性錯誤時,
+        # 才依序切到 env 設定的跨供應商 fallback model。fallback 觸發/成功都打 log,
+        # 維運可 grep naru_llm_fallback_trigger / naru_llm_fallback_success 看是否頂上成功。
+        fallbacks = [m for m in _get_fallback_models() if m != model]
+        models_to_try = [model, *fallbacks]
+        last_exc: BaseException | None = None
+        for idx, m in enumerate(models_to_try):
+            params = self._build_params(messages, model=m, tools=tools, temperature=temperature,
+                                        response_format=response_format, api_key=api_key)
+            try:
+                resp = await self._call(params, timeout_s)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                raise  # 硬 deadline:換家也超出時間預算,直接上拋
+            except LLMBusyError:
+                raise  # 並發飽和:同一 gateway semaphore,換家照樣飽和
+            except Exception as exc:  # noqa: BLE001 — 由 _is_transient_llm_error 分流
+                last_exc = exc
+                remaining = models_to_try[idx + 1:]
+                if remaining and _is_transient_llm_error(exc):
+                    logger.warning(
+                        "naru_llm_fallback_trigger primary=%s failed_model=%s next=%s "
+                        "reason=%s usage_type=%s uid=%s",
+                        model, m, remaining[0], type(exc).__name__, usage_type, user_id)
+                    continue
+                raise  # 永久錯 / 已無 fallback → 維持原本上拋行為
+            if not resp.choices:
+                raise ValueError(f"LLM empty choices (safety filter / load). model={m}")
+            if idx > 0:
+                logger.warning(
+                    "naru_llm_fallback_success primary=%s fallback_model=%s usage_type=%s uid=%s",
+                    model, m, usage_type, user_id)
+            self._log_usage(m, usage_type, user_id, resp)
+            return resp
+        raise last_exc  # type: ignore[misc]  # 迴圈非空時不會走到
 
     async def acomplete_structured(self, messages, *, model, usage_type, user_id, timeout_s, api_key=None):
         """結構化輸出：response_format={"type":"json_object"} + json.loads（寬鬆解析，
