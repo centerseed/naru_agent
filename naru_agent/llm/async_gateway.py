@@ -145,6 +145,66 @@ class AsyncLLMGateway:
             # 只有 transient 重試路徑會走到這（成功 return / 其他例外 raise 都已離開）。
             await asyncio.sleep(backoff)  # backoff 不佔名額,睡完下一圈重新搶
 
+    def _call_sync(self, params: dict, timeout_s: float, *, allow_retry: bool) -> Any:
+        """sync 版 _call:per-attempt 進 _sync_sem → litellm.completion → 出;
+        transient 重試 backoff 在釋放名額後 time.sleep(不佔名額,避免 503 storm 放大成 busy)。
+        allow_retry=False(非最後一顆)→ 一失敗立刻上拋讓 complete_sync 換家。
+        num_retries=0:關掉 litellm 內部重試,避免把 timeout_s 乘上去(紅隊 B3)。"""
+        attempt = 0
+        while True:
+            if not self._sync_sem.acquire(timeout=self._admit_timeout_s):
+                raise LLMBusyError("llm concurrency saturated (sync)")
+            backoff = None
+            try:
+                return litellm.completion(**params, timeout=timeout_s, num_retries=0)
+            except Exception as exc:  # noqa: BLE001 — 由 _is_transient_llm_error 分流
+                if not (allow_retry and _is_transient_llm_error(exc)
+                        and attempt < _MAX_TRANSIENT_RETRIES):
+                    raise
+                attempt += 1
+                backoff = _last_model_retry_schedule()[attempt - 1]
+                logger.warning(
+                    "llm transient error (sync retry %s/%s after %.1fs): %s",
+                    attempt, _MAX_TRANSIENT_RETRIES, backoff, exc)
+            finally:
+                self._sync_sem.release()
+            time.sleep(backoff)
+
+    def complete_sync(self, messages, *, model, usage_type, user_id, timeout_s,
+                      tools=None, temperature=None, response_format=None, api_key=None):
+        """acomplete 的同步孿生:相同 fail-fast + 跨供應商 fallback + last-model 重試(共用 policy)。
+        供 to_thread 內或純 sync 路徑呼叫(如 tool_calling_classifier)。
+        ⚠️ 勿在 event loop 直呼(會阻塞);逾時非硬牆(靠 litellm timeout 生效階段,見 B3)。"""
+        models_to_try = _plan_attempts(model)
+        last_exc: BaseException | None = None
+        for idx, m in enumerate(models_to_try):
+            is_last = idx == len(models_to_try) - 1
+            remaining = models_to_try[idx + 1:]
+            params = self._build_params(messages, model=m, tools=tools, temperature=temperature,
+                                        response_format=response_format, api_key=api_key)
+            try:
+                resp = self._call_sync(params, timeout_s, allow_retry=is_last)
+            except LLMBusyError:
+                raise  # 並發飽和:換家照樣飽和,直接上拋讓呼叫端降級
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                if remaining and _is_transient_llm_error(exc):
+                    logger.warning(
+                        "naru_llm_fallback_trigger primary=%s failed_model=%s next=%s "
+                        "reason=%s usage_type=%s uid=%s",
+                        model, m, remaining[0], type(exc).__name__, usage_type, user_id)
+                    continue
+                raise
+            if not resp.choices:
+                raise ValueError(f"LLM empty choices (safety filter / load). model={m}")
+            if idx > 0:
+                logger.warning(
+                    "naru_llm_fallback_success primary=%s fallback_model=%s usage_type=%s uid=%s",
+                    model, m, usage_type, user_id)
+            self._log_usage(m, usage_type, user_id, resp)
+            return resp
+        raise last_exc  # type: ignore[misc]
+
     @staticmethod
     def _build_params(messages, *, model, tools, temperature, response_format, api_key) -> dict:
         params: dict[str, Any] = {"model": model, "messages": messages}
