@@ -42,8 +42,8 @@ class BaseToolCallingClassifier(ABC):
 
 
 class LLMToolCallingClassifier(BaseToolCallingClassifier):
-    """Uses litellm.completion with tool schemas to let a lightweight model
-    decide which tools to call, then executes them."""
+    """Routes through llm_gateway.complete_sync with tool schemas to let a lightweight
+    model decide which tools to call, then executes them (gains Mistral fallback)."""
 
     def __init__(
         self,
