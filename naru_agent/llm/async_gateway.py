@@ -17,6 +17,8 @@ import asyncio
 import json
 import logging
 import os
+import threading
+import time
 from typing import Any
 
 import litellm
@@ -102,6 +104,11 @@ class AsyncLLMGateway:
         n = max_concurrency or int(os.getenv("NARU_LLM_MAX_CONCURRENCY", "8"))
         self._sem = asyncio.Semaphore(n)
         self._admit_timeout_s = admit_timeout_s
+        # sync 入口(complete_sync)專用並發閘:不借 asyncio default executor、
+        # 不吃 async semaphore(asyncio.Semaphore 不能跨 thread)。滿載 fail-fast LLMBusyError,
+        # 避免 fallback 拉長的 sync 呼叫在 503 storm 下餓死共用 ThreadPoolExecutor(紅隊 B2)。
+        n_sync = int(os.getenv("NARU_LLM_SYNC_MAX_CONCURRENCY", str(n)))
+        self._sync_sem = threading.Semaphore(n_sync)
 
     async def _call(self, params: dict, timeout_s: float, *, allow_retry: bool = True) -> Any:
         # 每次嘗試「進名額 → 打 → 出名額」；transient 重試的 backoff 在『釋放名額之後』才睡,
