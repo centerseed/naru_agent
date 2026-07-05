@@ -84,14 +84,14 @@ def _is_transient_llm_error(exc: BaseException) -> bool:
 
 def _plan_attempts(model: str) -> list[str]:
     """換家順序(單一來源):primary 排第一,接 env fallback(去重、去自身)。
-    async acomplete 與 sync complete_sync 共用,保證兩邊試的 model 序列一致。"""
+    async acomplete 已使用;未來 sync 入口(complete_sync,尚未接線)將共用同一序列。"""
     fallbacks = [m for m in _get_fallback_models() if m != model]
     return [model, *fallbacks]
 
 
 def _last_model_retry_schedule() -> list[float]:
     """鏈上最後一顆 model 的 same-model transient 重試 backoff 秒序(policy 資料)。
-    async/sync 共用同一份,確保 storm 下兩邊放棄時機一致(紅隊 B1)。"""
+    設計為 async/sync 共用同一份 backoff 排程(紅隊 B1);目前尚未接線,待後續 _call_sync 接上。"""
     return [_TRANSIENT_BACKOFF_S * (i + 1) for i in range(_MAX_TRANSIENT_RETRIES)]
 
 
