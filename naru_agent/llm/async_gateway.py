@@ -82,6 +82,19 @@ def _is_transient_llm_error(exc: BaseException) -> bool:
     )
 
 
+def _plan_attempts(model: str) -> list[str]:
+    """換家順序(單一來源):primary 排第一,接 env fallback(去重、去自身)。
+    async acomplete 與 sync complete_sync 共用,保證兩邊試的 model 序列一致。"""
+    fallbacks = [m for m in _get_fallback_models() if m != model]
+    return [model, *fallbacks]
+
+
+def _last_model_retry_schedule() -> list[float]:
+    """鏈上最後一顆 model 的 same-model transient 重試 backoff 秒序(policy 資料)。
+    async/sync 共用同一份,確保 storm 下兩邊放棄時機一致(紅隊 B1)。"""
+    return [_TRANSIENT_BACKOFF_S * (i + 1) for i in range(_MAX_TRANSIENT_RETRIES)]
+
+
 class AsyncLLMGateway:
     """並發安全的 async LLM 出口：per-call semaphore + asyncio.wait_for 真取消。"""
 
@@ -156,8 +169,7 @@ class AsyncLLMGateway:
         # 維運可 grep naru_llm_fallback_trigger / naru_llm_fallback_success 看是否頂上成功。
         # T-0130 案例3 修正:①gemini 過載 storm 一 503 就換 Mistral,不原地 retry 到逾時;
         # ②primary【逾時】也視同失敗換家(舊 code 逾時直接上拋 → Mistral 從沒被觸發、用戶撞 busy)。
-        fallbacks = [m for m in _get_fallback_models() if m != model]
-        models_to_try = [model, *fallbacks]
+        models_to_try = _plan_attempts(model)
         last_exc: BaseException | None = None
         for idx, m in enumerate(models_to_try):
             is_last = idx == len(models_to_try) - 1
