@@ -90,10 +90,15 @@ class AsyncLLMGateway:
         self._sem = asyncio.Semaphore(n)
         self._admit_timeout_s = admit_timeout_s
 
-    async def _call(self, params: dict, timeout_s: float) -> Any:
+    async def _call(self, params: dict, timeout_s: float, *, allow_retry: bool = True) -> Any:
         # 每次嘗試「進名額 → 打 → 出名額」；transient 重試的 backoff 在『釋放名額之後』才睡,
         # 重試者不再佔著 semaphore 乾等 → 503 storm 不會被退避放大成 LLMBusyError storm
         # (2026-06-22 真 prod key 壓測實證:佔名額退避會把零星 503 放大成 busy 失敗)。
+        #
+        # allow_retry=False(acomplete 對「非最後一顆 model」傳入):一失敗就上拋、不原地重試,
+        # 讓 acomplete 立刻切下一家(fail-fast)。治 T-0130 案例3:gemini 過載 storm 時原地
+        # 2-4s 重試會燒光 timeout 預算、還可能撞 timeout_s 逾時,而逾時原本直接上拋、Mistral
+        # 從沒被觸發。只有鏈上「最後一顆」(無處可切)才做 same-model transient 重試當保險。
         attempt = 0
         while True:
             try:
@@ -105,9 +110,10 @@ class AsyncLLMGateway:
                 return await asyncio.wait_for(litellm.acompletion(**params), timeout=timeout_s)
             except (asyncio.TimeoutError, asyncio.CancelledError):
                 # 硬 deadline / 取消：不重試（重試會超出呼叫端時間預算），直接上拋。
+                # (逾時的「換家」由 acomplete 決策:非最後一顆 → 切 fallback;最後一顆 → 上拋。)
                 raise
             except Exception as exc:  # noqa: BLE001 — 由 _is_transient_llm_error 分流
-                if not (_is_transient_llm_error(exc) and attempt < _MAX_TRANSIENT_RETRIES):
+                if not (allow_retry and _is_transient_llm_error(exc) and attempt < _MAX_TRANSIENT_RETRIES):
                     raise
                 attempt += 1
                 backoff = _TRANSIENT_BACKOFF_S * attempt
@@ -145,24 +151,38 @@ class AsyncLLMGateway:
 
     async def acomplete(self, messages, *, model, usage_type, user_id, timeout_s,
                         tools=None, temperature=None, response_format=None, api_key=None):
-        # primary model 先試;同 model transient 重試(_call 內)耗盡且為暫時性錯誤時,
-        # 才依序切到 env 設定的跨供應商 fallback model。fallback 觸發/成功都打 log,
+        # primary model 一失敗(暫時性錯誤或逾時)就立刻切下一家(fail-fast,不原地重試燒時間);
+        # 只有鏈上最後一顆(無處可切)才 same-model transient 重試當保險。fallback 觸發/成功都打 log,
         # 維運可 grep naru_llm_fallback_trigger / naru_llm_fallback_success 看是否頂上成功。
+        # T-0130 案例3 修正:①gemini 過載 storm 一 503 就換 Mistral,不原地 retry 到逾時;
+        # ②primary【逾時】也視同失敗換家(舊 code 逾時直接上拋 → Mistral 從沒被觸發、用戶撞 busy)。
         fallbacks = [m for m in _get_fallback_models() if m != model]
         models_to_try = [model, *fallbacks]
         last_exc: BaseException | None = None
         for idx, m in enumerate(models_to_try):
+            is_last = idx == len(models_to_try) - 1
+            remaining = models_to_try[idx + 1:]
             params = self._build_params(messages, model=m, tools=tools, temperature=temperature,
                                         response_format=response_format, api_key=api_key)
             try:
-                resp = await self._call(params, timeout_s)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
-                raise  # 硬 deadline:換家也超出時間預算,直接上拋
+                # 非最後一顆 → allow_retry=False(fail-fast 換家);最後一顆 → 保留 same-model 重試。
+                resp = await self._call(params, timeout_s, allow_retry=is_last)
+            except asyncio.CancelledError:
+                raise  # 外層硬 deadline 取消:換家也超出呼叫端總預算,直接上拋
             except LLMBusyError:
                 raise  # 並發飽和:同一 gateway semaphore,換家照樣飽和
+            except asyncio.TimeoutError as exc:
+                # primary 逾時(model 太慢)= 該 model 失敗;有 fallback 就換家(A 修)。
+                last_exc = exc
+                if remaining:
+                    logger.warning(
+                        "naru_llm_fallback_trigger primary=%s failed_model=%s next=%s "
+                        "reason=timeout usage_type=%s uid=%s",
+                        model, m, remaining[0], usage_type, user_id)
+                    continue
+                raise  # 已無 fallback → 維持逾時上拋
             except Exception as exc:  # noqa: BLE001 — 由 _is_transient_llm_error 分流
                 last_exc = exc
-                remaining = models_to_try[idx + 1:]
                 if remaining and _is_transient_llm_error(exc):
                     logger.warning(
                         "naru_llm_fallback_trigger primary=%s failed_model=%s next=%s "
