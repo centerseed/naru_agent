@@ -63,7 +63,7 @@ class LLMToolCallingClassifier(BaseToolCallingClassifier):
 
     def classify(self, message: str, tools: list[BaseTool]) -> ToolCallingResult:
         """Classify and execute tool calls."""
-        import litellm
+        from naru_agent.llm.async_gateway import llm_gateway
 
         tool_schemas = [t.to_schema() for t in tools]
         tool_map = {t.name: t for t in tools}
@@ -73,17 +73,19 @@ class LLMToolCallingClassifier(BaseToolCallingClassifier):
             {"role": "user", "content": message},
         ]
 
-        kwargs: dict[str, Any] = {
-            "model": self.model,
-            "messages": messages,
-            "tools": tool_schemas,
-            "temperature": self.temperature,
-        }
-        if self.api_key:
-            kwargs["api_key"] = self.api_key
-
         try:
-            response = litellm.completion(**kwargs)
+            # 走 gateway sync 入口:取得 fail-fast + Mistral fallback(此方法跑在 achat 的
+            # to_thread 內,complete_sync 自持並發閘、不阻塞 event loop)。
+            response = llm_gateway.complete_sync(
+                messages,
+                model=self.model,
+                usage_type="tool_classifier",
+                user_id="",
+                timeout_s=15,
+                tools=tool_schemas,
+                temperature=self.temperature,
+                api_key=self.api_key,
+            )
         except Exception:
             logger.warning("Tool calling classifier LLM call failed", exc_info=True)
             return ToolCallingResult()
