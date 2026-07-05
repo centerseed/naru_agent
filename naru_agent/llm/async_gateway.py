@@ -157,6 +157,11 @@ class AsyncLLMGateway:
             backoff = None
             try:
                 return litellm.completion(**params, timeout=timeout_s, num_retries=0)
+            except litellm.Timeout:
+                # 硬 deadline:逾時不 same-model 重試(重試會超出呼叫端時間預算),對齊 async _call
+                # 對 asyncio.TimeoutError 的處理。非最後一顆的逾時「換家」由 complete_sync 外層決策
+                # (litellm.Timeout 是 transient,remaining 有就切下一家)。
+                raise
             except Exception as exc:  # noqa: BLE001 — 由 _is_transient_llm_error 分流
                 if not (allow_retry and _is_transient_llm_error(exc)
                         and attempt < _MAX_TRANSIENT_RETRIES):
@@ -168,10 +173,11 @@ class AsyncLLMGateway:
                     attempt, _MAX_TRANSIENT_RETRIES, backoff, exc)
             finally:
                 self._sync_sem.release()
+            # 只有 transient 重試路徑會走到這（成功 return / 其他例外 raise 都已離開）
             time.sleep(backoff)
 
     def complete_sync(self, messages, *, model, usage_type, user_id, timeout_s,
-                      tools=None, temperature=None, response_format=None, api_key=None):
+                        tools=None, temperature=None, response_format=None, api_key=None):
         """acomplete 的同步孿生:相同 fail-fast + 跨供應商 fallback + last-model 重試(共用 policy)。
         供 to_thread 內或純 sync 路徑呼叫(如 tool_calling_classifier)。
         ⚠️ 勿在 event loop 直呼(會阻塞);逾時非硬牆(靠 litellm timeout 生效階段,見 B3)。"""
