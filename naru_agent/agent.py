@@ -35,6 +35,41 @@ _FALLBACK_ANSWER_DIRECTIVE = (
 )
 
 
+class _GatewayLiteLLM(AgnoLiteLLM):
+    """Agno LiteLLM adapter whose async calls use the shared Naru gateway."""
+
+    gateway_usage_type: str = "rizo_chat"
+    gateway_user_id: str = ""
+    gateway_timeout_s: float = 30.0
+
+    async def ainvoke(
+        self,
+        messages,
+        assistant_message,
+        response_format=None,
+        tools=None,
+        tool_choice=None,
+        run_response=None,
+        compress_tool_results: bool = False,
+    ):
+        from naru_agent.llm.async_gateway import llm_gateway
+
+        assistant_message.metrics.start_timer()
+        provider_response = await llm_gateway.acomplete(
+            self._format_messages(messages, compress_tool_results),
+            model=self.id,
+            usage_type=self.gateway_usage_type,
+            user_id=self.gateway_user_id,
+            timeout_s=self.gateway_timeout_s,
+            tools=tools,
+            temperature=self.temperature,
+            api_key=self.api_key,
+        )
+        assistant_message.metrics.stop_timer()
+
+        return self._parse_provider_response(provider_response, response_format=response_format)
+
+
 # ---------------------------------------------------------------------------
 # Legacy Agent (kept for backward compatibility)
 # ---------------------------------------------------------------------------
@@ -220,6 +255,7 @@ class NaruAgent:
         event_bus: Any | None = None,
         prefetch_hooks: list[Callable] | None = None,
         trace_exporters: list[Any] | None = None,
+        usage_type: str = "rizo_chat",
         # Skills
         skills: list[Any] | None = None,
         skill_selector: Any | None = None,
@@ -243,6 +279,7 @@ class NaruAgent:
         self.max_parallel_tools = max_parallel_tools
         self.markdown = markdown
         self.temperature = temperature
+        self.usage_type = usage_type
         self.prefetch_timeout = prefetch_timeout
         # Session management
         self.add_history_to_context = add_history_to_context
@@ -712,6 +749,8 @@ class NaruAgent:
                 "message_count": len(prep.dynamic_instructions) + 1,
             })
         t_llm = time.perf_counter()
+        if isinstance(self._agno_model, _GatewayLiteLLM):
+            self._agno_model.gateway_user_id = prep.user_id or ""
         agno_result = await self._agno_agent.arun(message, **run_kwargs)
         llm_latency_ms = (time.perf_counter() - t_llm) * 1000
         self._emit_after_llm(agno_result, llm_latency_ms)
@@ -906,7 +945,8 @@ class NaruAgent:
                 model_kwargs: dict[str, Any] = {"id": self.model_id, "temperature": self.temperature}
                 if self.api_key:
                     model_kwargs["api_key"] = self.api_key
-                self._agno_model = AgnoLiteLLM(**model_kwargs)
+                self._agno_model = _GatewayLiteLLM(**model_kwargs)
+                self._agno_model.gateway_usage_type = self.usage_type
             return self._agno_model
 
     def _fetch_memory(self, user_id: str, message: str) -> str:
