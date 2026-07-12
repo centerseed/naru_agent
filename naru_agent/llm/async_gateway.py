@@ -32,6 +32,15 @@ class LLMBusyError(Exception):
     """全域 LLM 並發已滿，請稍候（呼叫端可轉 HTTP 429）。"""
 
 
+class StreamReassemblyError(Exception):
+    """串流塊重組回 ModelResponse 失敗 —— 我方(litellm 重組)的錯,不是上游暫時性錯誤。
+
+    litellm.stream_chunk_builder 內部失敗時會包成 litellm.APIError(status_code=500),
+    那會被 _is_transient_llm_error 判成 transient → 白燒一次 LLM 呼叫 + 一顆 fallback
+    供應商去重跑一個「重組 bug」。這裡改拋自家型別(不帶上游狀態碼/關鍵字)讓它 fail-fast。
+    """
+
+
 # 暫時性錯誤重試：Gemini / 上游偶發 503/502/504/429/連線重置是常態 burst，單發失敗會讓上層
 # 判斷器（accept-intent / agreement / scope）直接降級成「沒同意」→ 使用者按了「要」卻被當沒反應、
 # 落到「我還沒準備好變更」死路（2026-06-22 prod 實證：一個 503 把同意流程打斷）。舊的同步
@@ -138,25 +147,49 @@ class AsyncLLMGateway:
         chunks: list[Any] = []
         stream = await litellm.acompletion(
             **params, stream=True, stream_options={"include_usage": True})
-        async for chunk in stream:
-            chunks.append(chunk)
-            choices = getattr(chunk, "choices", None) or ()
-            if not choices:
-                continue
-            delta = getattr(choices[0], "delta", None)
-            text = getattr(delta, "content", None)
-            if text:
-                sink.push(text)
+        try:
+            async for chunk in stream:
+                chunks.append(chunk)
+                choices = getattr(chunk, "choices", None) or ()
+                if not choices:
+                    continue
+                delta = getattr(choices[0], "delta", None)
+                text = getattr(delta, "content", None)
+                if text:
+                    sink.push(text)
+        finally:
+            # 逾時(wait_for 取消 async for)/ 供應商中途斷線都會直接離開迴圈,stream 被丟掉、
+            # 底層 httpx response 撐到 GC 才關 —— 正好是 503/timeout storm(fallback 存在的理由)
+            # 最不能漏連線的時候。CustomStreamWrapper 有 aclose(),明確關掉。
+            aclose = getattr(stream, "aclose", None)
+            if aclose is not None:
+                try:
+                    await aclose()
+                except Exception as exc:  # noqa: BLE001 — 收尾失敗不得蓋掉真正的錯
+                    logger.warning("llm stream aclose failed: %s", exc)
 
-        resp = litellm.stream_chunk_builder(chunks, messages=params.get("messages"))
+        try:
+            resp = litellm.stream_chunk_builder(chunks, messages=params.get("messages"))
+        except Exception as exc:  # noqa: BLE001 — 重組失敗是我方 bug,不可偽裝成 transient
+            logger.error("llm stream reassembly failed: %s", exc)
+            raise StreamReassemblyError(
+                f"streamed response reassembly failed: {type(exc).__name__}") from exc
         if resp is None:
-            raise ValueError("streamed response could not be reassembled")
+            raise StreamReassemblyError("streamed response could not be reassembled")
 
         # agno 會丟棄「與 tool_calls 一起吐出來」的 prose(它只執行工具、再發一通拿正文)。
         # 我們已經把那段 prose 串給用戶了 → 叫 client 清掉,別留下最後不會出現的半句。
+        #
+        # ⚠️ 不能只看 finish_reason:我們送 stream_options={"include_usage": True},litellm 會在
+        # 尾端多吐一塊 usage-only chunk,而那塊的 choices 不是空的(finish_reason=None),
+        # stream_chunk_builder 對每個「choices 非空」的 chunk 覆寫 finish_reason → "tool_calls"
+        # 被尾塊蓋成 "stop"(litellm 1.83.0 實證)。以重組後的 message.tool_calls 為主判準。
         choices = getattr(resp, "choices", None) or ()
-        if choices and getattr(choices[0], "finish_reason", None) == "tool_calls":
-            sink.reset()
+        if choices and sink.pushed_since_reset:
+            msg = getattr(choices[0], "message", None)
+            if (getattr(msg, "tool_calls", None)
+                    or getattr(choices[0], "finish_reason", None) == "tool_calls"):
+                sink.reset()
         return resp
 
     async def _call(self, params: dict, timeout_s: float, *, allow_retry: bool = True,
@@ -309,48 +342,55 @@ class AsyncLLMGateway:
 
         models_to_try = _plan_attempts(model, model_fallbacks)
         last_exc: BaseException | None = None
-        for idx, m in enumerate(models_to_try):
-            is_last = idx == len(models_to_try) - 1
-            remaining = models_to_try[idx + 1:]
-            params = self._build_params(messages, model=m, tools=tools, temperature=temperature,
-                                        response_format=response_format, api_key=api_key)
-            try:
-                # 非最後一顆 → allow_retry=False(fail-fast 換家);最後一顆 → 保留 same-model 重試。
-                resp = await self._call(params, timeout_s, allow_retry=is_last, sink=sink)
-            except asyncio.CancelledError:
-                raise  # 外層硬 deadline 取消:換家也超出呼叫端總預算,直接上拋
-            except LLMBusyError:
-                raise  # 並發飽和:同一 gateway semaphore,換家照樣飽和
-            except asyncio.TimeoutError as exc:
-                # primary 逾時(model 太慢)= 該 model 失敗;有 fallback 就換家(A 修)。
-                last_exc = exc
-                if remaining:
-                    _drop_partial()
+        # 整條 ladder 包起來:只要 acomplete 沒有帶著成功的 resp 離開(逾時無 fallback、永久錯、
+        # 最後一顆重試耗盡、empty choices、CancelledError…),已串出去的半句就永遠不會被完成
+        # → 用戶盯著一句斷掉的話。單點保證「非成功離開 = 先叫 client 清掉」,不必在每個 raise 前撒。
+        try:
+            for idx, m in enumerate(models_to_try):
+                is_last = idx == len(models_to_try) - 1
+                remaining = models_to_try[idx + 1:]
+                params = self._build_params(messages, model=m, tools=tools, temperature=temperature,
+                                            response_format=response_format, api_key=api_key)
+                try:
+                    # 非最後一顆 → allow_retry=False(fail-fast 換家);最後一顆 → 保留 same-model 重試。
+                    resp = await self._call(params, timeout_s, allow_retry=is_last, sink=sink)
+                except asyncio.CancelledError:
+                    raise  # 外層硬 deadline 取消:換家也超出呼叫端總預算,直接上拋
+                except LLMBusyError:
+                    raise  # 並發飽和:同一 gateway semaphore,換家照樣飽和
+                except asyncio.TimeoutError as exc:
+                    # primary 逾時(model 太慢)= 該 model 失敗;有 fallback 就換家(A 修)。
+                    last_exc = exc
+                    if remaining:
+                        _drop_partial()
+                        logger.warning(
+                            "naru_llm_fallback_trigger primary=%s failed_model=%s next=%s "
+                            "reason=timeout usage_type=%s uid=%s",
+                            model, m, remaining[0], usage_type, user_id)
+                        continue
+                    raise  # 已無 fallback → 維持逾時上拋
+                except Exception as exc:  # noqa: BLE001 — 由 _is_transient_llm_error 分流
+                    last_exc = exc
+                    if remaining and _is_transient_llm_error(exc):
+                        _drop_partial()
+                        logger.warning(
+                            "naru_llm_fallback_trigger primary=%s failed_model=%s next=%s "
+                            "reason=%s usage_type=%s uid=%s",
+                            model, m, remaining[0], type(exc).__name__, usage_type, user_id)
+                        continue
+                    raise  # 永久錯 / 已無 fallback → 維持原本上拋行為
+                if not resp.choices:
+                    raise ValueError(f"LLM empty choices (safety filter / load). model={m}")
+                if idx > 0:
                     logger.warning(
-                        "naru_llm_fallback_trigger primary=%s failed_model=%s next=%s "
-                        "reason=timeout usage_type=%s uid=%s",
-                        model, m, remaining[0], usage_type, user_id)
-                    continue
-                raise  # 已無 fallback → 維持逾時上拋
-            except Exception as exc:  # noqa: BLE001 — 由 _is_transient_llm_error 分流
-                last_exc = exc
-                if remaining and _is_transient_llm_error(exc):
-                    _drop_partial()
-                    logger.warning(
-                        "naru_llm_fallback_trigger primary=%s failed_model=%s next=%s "
-                        "reason=%s usage_type=%s uid=%s",
-                        model, m, remaining[0], type(exc).__name__, usage_type, user_id)
-                    continue
-                raise  # 永久錯 / 已無 fallback → 維持原本上拋行為
-            if not resp.choices:
-                raise ValueError(f"LLM empty choices (safety filter / load). model={m}")
-            if idx > 0:
-                logger.warning(
-                    "naru_llm_fallback_success primary=%s fallback_model=%s usage_type=%s uid=%s",
-                    model, m, usage_type, user_id)
-            self._log_usage(m, usage_type, user_id, resp)
-            return resp
-        raise last_exc  # type: ignore[misc]  # 迴圈非空時不會走到
+                        "naru_llm_fallback_success primary=%s fallback_model=%s usage_type=%s uid=%s",
+                        model, m, usage_type, user_id)
+                self._log_usage(m, usage_type, user_id, resp)
+                return resp
+            raise last_exc  # type: ignore[misc]  # 迴圈非空時不會走到
+        except BaseException:
+            _drop_partial()
+            raise
 
     async def acomplete_structured(self, messages, *, model, usage_type, user_id, timeout_s, api_key=None):
         """結構化輸出：response_format={"type":"json_object"} + json.loads（寬鬆解析，
