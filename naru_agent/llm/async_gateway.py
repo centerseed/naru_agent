@@ -84,11 +84,19 @@ def _is_transient_llm_error(exc: BaseException) -> bool:
     )
 
 
-def _plan_attempts(model: str) -> list[str]:
-    """換家順序(單一來源):primary 排第一,接 env fallback(去重、去自身)。
-    async acomplete 已使用;未來 sync 入口(complete_sync,尚未接線)將共用同一序列。"""
-    fallbacks = [m for m in _get_fallback_models() if m != model]
-    return [model, *fallbacks]
+def _plan_attempts(model: str, per_call_fallbacks: list[str] | None = None) -> list[str]:
+    """換家順序(單一來源):primary → 呼叫端 per-usage fallback → env 跨供應商 fallback。
+
+    per_call_fallbacks 由呼叫端從 agent_models.yaml 的 per-usage `model_fallbacks`
+    讀出後傳入 —— naru_agent 是獨立 lib,不得 import app 層的 core.llm.agent_model_config,
+    所以設定只能用「注入」而非「自己去讀」。順序與 LiteLLMAdapter._model_ladder 對齊:
+    per-usage 先於 provider/env 級 fallback。去重、去掉與 primary 相同者,保序。
+    """
+    ladder = [model]
+    for candidate in [*(per_call_fallbacks or []), *_get_fallback_models()]:
+        if candidate and candidate not in ladder:
+            ladder.append(candidate)
+    return ladder
 
 
 def _last_model_retry_schedule() -> list[float]:
@@ -236,13 +244,16 @@ class AsyncLLMGateway:
         )
 
     async def acomplete(self, messages, *, model, usage_type, user_id, timeout_s,
-                        tools=None, temperature=None, response_format=None, api_key=None):
+                        tools=None, temperature=None, response_format=None, api_key=None,
+                        model_fallbacks=None):
         # primary model 一失敗(暫時性錯誤或逾時)就立刻切下一家(fail-fast,不原地重試燒時間);
         # 只有鏈上最後一顆(無處可切)才 same-model transient 重試當保險。fallback 觸發/成功都打 log,
         # 維運可 grep naru_llm_fallback_trigger / naru_llm_fallback_success 看是否頂上成功。
         # T-0130 案例3 修正:①gemini 過載 storm 一 503 就換 Mistral,不原地 retry 到逾時;
         # ②primary【逾時】也視同失敗換家(舊 code 逾時直接上拋 → Mistral 從沒被觸發、用戶撞 busy)。
-        models_to_try = _plan_attempts(model)
+        # model_fallbacks:呼叫端注入的 per-usage fallback(來自 agent_models.yaml),
+        # 預設 None → 與改動前行為完全相同(只走 env 跨供應商 fallback)。
+        models_to_try = _plan_attempts(model, model_fallbacks)
         last_exc: BaseException | None = None
         for idx, m in enumerate(models_to_try):
             is_last = idx == len(models_to_try) - 1
