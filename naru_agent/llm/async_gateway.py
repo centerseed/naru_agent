@@ -23,6 +23,8 @@ from typing import Any
 
 import litellm
 
+from naru_agent.llm.delta_sink import DeltaSink, current_delta_sink
+
 logger = logging.getLogger(__name__)
 
 
@@ -48,6 +50,10 @@ _TRANSIENT_BACKOFF_S = 2.0
 # Gemini 全過載時(2026-06 prod 503 storm)Rizo 不再整條死在「系統忙線中」。
 # 每次呼叫即時讀 env,方便用 env flag 安全開關(key 未備好就維持空值=不啟用)。
 _FALLBACK_MODELS_ENV = "NARU_LLM_FALLBACK_MODELS"
+
+# 只有主 coach 的回覆會逐字串給用戶。其餘 usage_type(compression / intent / judge /
+# 課表生成 / 跑步分析…)即使 request 裝了 sink 也不進串流路徑,行為位元級不變。
+STREAMABLE_USAGE_TYPES = frozenset({"rizo_coach"})
 
 
 def _get_fallback_models() -> list[str]:
@@ -118,7 +124,43 @@ class AsyncLLMGateway:
         n_sync = int(os.getenv("NARU_LLM_SYNC_MAX_CONCURRENCY", str(n)))
         self._sync_sem = threading.Semaphore(n_sync)
 
-    async def _call(self, params: dict, timeout_s: float, *, allow_retry: bool = True) -> Any:
+    async def _acompletion(self, params: dict, sink: DeltaSink | None) -> Any:
+        """唯一的 litellm 呼叫點。無 sink → 與改動前完全相同的一行。
+
+        有 sink → 開 stream 逐塊推 delta,再用 litellm.stream_chunk_builder 重組回
+        一個完整 ModelResponse 回傳。呼叫端(agno)拿到的東西與非串流時同構,因此
+        agno 永遠不需要進 streaming mode、ainvoke_stream 永不被呼叫,gateway 的
+        semaphore / 逾時 / fallback / 逐通 log 全部原封不動地繼續生效。
+        """
+        if sink is None:
+            return await litellm.acompletion(**params)
+
+        chunks: list[Any] = []
+        stream = await litellm.acompletion(
+            **params, stream=True, stream_options={"include_usage": True})
+        async for chunk in stream:
+            chunks.append(chunk)
+            choices = getattr(chunk, "choices", None) or ()
+            if not choices:
+                continue
+            delta = getattr(choices[0], "delta", None)
+            text = getattr(delta, "content", None)
+            if text:
+                sink.push(text)
+
+        resp = litellm.stream_chunk_builder(chunks, messages=params.get("messages"))
+        if resp is None:
+            raise ValueError("streamed response could not be reassembled")
+
+        # agno 會丟棄「與 tool_calls 一起吐出來」的 prose(它只執行工具、再發一通拿正文)。
+        # 我們已經把那段 prose 串給用戶了 → 叫 client 清掉,別留下最後不會出現的半句。
+        choices = getattr(resp, "choices", None) or ()
+        if choices and getattr(choices[0], "finish_reason", None) == "tool_calls":
+            sink.reset()
+        return resp
+
+    async def _call(self, params: dict, timeout_s: float, *, allow_retry: bool = True,
+                    sink: DeltaSink | None = None) -> Any:
         # 每次嘗試「進名額 → 打 → 出名額」；transient 重試的 backoff 在『釋放名額之後』才睡,
         # 重試者不再佔著 semaphore 乾等 → 503 storm 不會被退避放大成 LLMBusyError storm
         # (2026-06-22 真 prod key 壓測實證:佔名額退避會把零星 503 放大成 busy 失敗)。
@@ -135,7 +177,8 @@ class AsyncLLMGateway:
                 raise LLMBusyError("llm concurrency saturated")
             backoff = None
             try:
-                return await asyncio.wait_for(litellm.acompletion(**params), timeout=timeout_s)
+                return await asyncio.wait_for(
+                    self._acompletion(params, sink), timeout=timeout_s)
             except (asyncio.TimeoutError, asyncio.CancelledError):
                 # 硬 deadline / 取消：不重試（重試會超出呼叫端時間預算），直接上拋。
                 # (逾時的「換家」由 acomplete 決策:非最後一顆 → 切 fallback;最後一顆 → 上拋。)
@@ -144,6 +187,9 @@ class AsyncLLMGateway:
                 if not (allow_retry and _is_transient_llm_error(exc) and attempt < _MAX_TRANSIENT_RETRIES):
                     raise
                 attempt += 1
+                # same-model 重試 = 重問一次,已串出去的半句不會出現在最終答案裡。
+                if sink is not None and sink.pushed_since_reset:
+                    sink.reset()
                 backoff = _TRANSIENT_BACKOFF_S * attempt
                 logger.warning(
                     "llm transient error (retry %s/%s after %.1fs): %s",
@@ -253,6 +299,14 @@ class AsyncLLMGateway:
         # ②primary【逾時】也視同失敗換家(舊 code 逾時直接上拋 → Mistral 從沒被觸發、用戶撞 busy)。
         # model_fallbacks:呼叫端注入的 per-usage fallback(來自 agent_models.yaml),
         # 預設 None → 與改動前行為完全相同(只走 env 跨供應商 fallback)。
+        # sink 只在「本 request 裝了 sink」且「這個 usage_type 允許串流」時生效。
+        sink = current_delta_sink() if usage_type in STREAMABLE_USAGE_TYPES else None
+
+        def _drop_partial() -> None:
+            # 換家 = 換一個 model 重新回答,已串出去的半句與最終答案無關。
+            if sink is not None and sink.pushed_since_reset:
+                sink.reset()
+
         models_to_try = _plan_attempts(model, model_fallbacks)
         last_exc: BaseException | None = None
         for idx, m in enumerate(models_to_try):
@@ -262,7 +316,7 @@ class AsyncLLMGateway:
                                         response_format=response_format, api_key=api_key)
             try:
                 # 非最後一顆 → allow_retry=False(fail-fast 換家);最後一顆 → 保留 same-model 重試。
-                resp = await self._call(params, timeout_s, allow_retry=is_last)
+                resp = await self._call(params, timeout_s, allow_retry=is_last, sink=sink)
             except asyncio.CancelledError:
                 raise  # 外層硬 deadline 取消:換家也超出呼叫端總預算,直接上拋
             except LLMBusyError:
@@ -271,6 +325,7 @@ class AsyncLLMGateway:
                 # primary 逾時(model 太慢)= 該 model 失敗;有 fallback 就換家(A 修)。
                 last_exc = exc
                 if remaining:
+                    _drop_partial()
                     logger.warning(
                         "naru_llm_fallback_trigger primary=%s failed_model=%s next=%s "
                         "reason=timeout usage_type=%s uid=%s",
@@ -280,6 +335,7 @@ class AsyncLLMGateway:
             except Exception as exc:  # noqa: BLE001 — 由 _is_transient_llm_error 分流
                 last_exc = exc
                 if remaining and _is_transient_llm_error(exc):
+                    _drop_partial()
                     logger.warning(
                         "naru_llm_fallback_trigger primary=%s failed_model=%s next=%s "
                         "reason=%s usage_type=%s uid=%s",
