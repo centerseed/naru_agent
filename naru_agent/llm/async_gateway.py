@@ -60,6 +60,13 @@ _TRANSIENT_BACKOFF_S = 2.0
 # 每次呼叫即時讀 env,方便用 env flag 安全開關(key 未備好就維持空值=不啟用)。
 _FALLBACK_MODELS_ENV = "NARU_LLM_FALLBACK_MODELS"
 
+# 帶自訂 function-calling tools 的請求不可 fallback 到的供應商:Mistral 的 `tools`
+# 欄位只接受自家內建 agent 工具 literal,自訂 schema 100% 400(T-0220 prod 實證:
+# data_query gemini 503 → mistral 400 → 用戶吃罐頭,「假裝有退路、實際必炸」)。
+# 只過濾 fallback 候選,不過濾 primary(primary 是呼叫端顯式選的,如 rizo_compression
+# 的 mistral primary 不帶 tools,不受影響)。
+_PROVIDERS_WITHOUT_CUSTOM_TOOLS = frozenset({"mistral"})
+
 # 只有主 coach 的回覆會逐字串給用戶。其餘 usage_type(compression / intent / judge /
 # 課表生成 / 跑步分析…)即使 request 裝了 sink 也不進串流路徑,行為位元級不變。
 STREAMABLE_USAGE_TYPES = frozenset({"rizo_coach"})
@@ -99,18 +106,28 @@ def _is_transient_llm_error(exc: BaseException) -> bool:
     )
 
 
-def _plan_attempts(model: str, per_call_fallbacks: list[str] | None = None) -> list[str]:
+def _plan_attempts(model: str, per_call_fallbacks: list[str] | None = None,
+                   *, has_tools: bool = False) -> list[str]:
     """換家順序(單一來源):primary → 呼叫端 per-usage fallback → env 跨供應商 fallback。
 
     per_call_fallbacks 由呼叫端從 agent_models.yaml 的 per-usage `model_fallbacks`
     讀出後傳入 —— naru_agent 是獨立 lib,不得 import app 層的 core.llm.agent_model_config,
     所以設定只能用「注入」而非「自己去讀」。順序與 LiteLLMAdapter._model_ladder 對齊:
     per-usage 先於 provider/env 級 fallback。去重、去掉與 primary 相同者,保序。
+
+    has_tools(T-0220):請求帶自訂 tools 時,剔除 _PROVIDERS_WITHOUT_CUSTOM_TOOLS 的
+    fallback 候選 —— 換過去必 400,比不換更糟(燒一次往返還是罐頭)。剔除後 ladder 可能
+    只剩 primary → 它成為最後一顆,自動獲得既有 same-model transient 重試。
     """
     ladder = [model]
     for candidate in [*(per_call_fallbacks or []), *_get_fallback_models()]:
-        if candidate and candidate not in ladder:
-            ladder.append(candidate)
+        if not candidate or candidate in ladder:
+            continue
+        if has_tools and candidate.partition("/")[0] in _PROVIDERS_WITHOUT_CUSTOM_TOOLS:
+            logger.info(
+                "naru_llm_fallback_skip model=%s reason=tools_unsupported", candidate)
+            continue
+        ladder.append(candidate)
     return ladder
 
 
@@ -268,7 +285,7 @@ class AsyncLLMGateway:
         """acomplete 的同步孿生:相同 fail-fast + 跨供應商 fallback + last-model 重試(共用 policy)。
         供 to_thread 內或純 sync 路徑呼叫(如 tool_calling_classifier)。
         ⚠️ 勿在 event loop 直呼(會阻塞);逾時非硬牆(靠 litellm timeout 生效階段,見 B3)。"""
-        models_to_try = _plan_attempts(model)
+        models_to_try = _plan_attempts(model, has_tools=bool(tools))
         last_exc: BaseException | None = None
         for idx, m in enumerate(models_to_try):
             is_last = idx == len(models_to_try) - 1
@@ -340,7 +357,7 @@ class AsyncLLMGateway:
             if sink is not None and sink.pushed_since_reset:
                 sink.reset()
 
-        models_to_try = _plan_attempts(model, model_fallbacks)
+        models_to_try = _plan_attempts(model, model_fallbacks, has_tools=bool(tools))
         last_exc: BaseException | None = None
         # 整條 ladder 包起來:只要 acomplete 沒有帶著成功的 resp 離開(逾時無 fallback、永久錯、
         # 最後一顆重試耗盡、empty choices、CancelledError…),已串出去的半句就永遠不會被完成
