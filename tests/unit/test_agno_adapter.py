@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import Literal
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -46,6 +47,23 @@ class TestBuildWrapper:
 
 
 class TestNaruToolkit:
+    def test_registered_agno_function_preserves_parameter_schema(self):
+        @tool(description="Search workouts by local date")
+        def workouts_on_date(
+            mode: Literal["recent", "on_date"], date: str, count: int = 5
+        ) -> str:
+            return f"{mode}:{date}:{count}"
+
+        adapter = NaruToolkit([workouts_on_date])
+        registered = adapter.toolkit.functions["workouts_on_date"]
+
+        properties = registered.parameters["properties"]
+        assert properties["mode"]["enum"] == ["recent", "on_date"]
+        assert properties["date"]["type"] == "string"
+        assert properties["count"]["type"] == "integer"
+        assert properties["count"]["default"] == 5
+        assert registered.parameters["required"] == ["mode", "date"]
+
     def test_registers_tools(self):
         @tool(description="Tool A")
         def tool_a(x: str) -> str:

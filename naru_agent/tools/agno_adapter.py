@@ -123,6 +123,7 @@ class NaruToolkit:
         semaphore: threading.Semaphore | None = None,
         deduplicate_calls: bool = True,
     ) -> None:
+        from agno.tools.function import Function
         from agno.tools.toolkit import Toolkit
 
         self._toolkit = Toolkit(name="naru_tools")
@@ -132,7 +133,18 @@ class NaruToolkit:
         for t in tools:
             try:
                 fn = _build_wrapper(t, semaphore=semaphore, call_cache=call_cache)
-                self._toolkit.register(fn)
+                # Toolkit.register(callable) constructs Function directly in
+                # Agno 2.5.x and therefore skips callable introspection.  Use
+                # Naru's Pydantic schema as the source of truth so enum/range/
+                # default constraints survive the adapter unchanged.
+                parameters = t.to_schema()["function"]["parameters"]
+                self._toolkit.register(Function(
+                    name=t.name,
+                    description=t.description,
+                    parameters=parameters,
+                    entrypoint=fn,
+                    skip_entrypoint_processing=True,
+                ))
             except Exception:
                 logger.exception("Failed to register tool '%s'", t.name)
 
