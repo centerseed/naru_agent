@@ -63,6 +63,12 @@ class TestNaruToolkit:
         assert properties["count"]["type"] == "integer"
         assert properties["count"]["default"] == 5
         assert registered.parameters["required"] == ["mode", "date"]
+        # Agno's decorated-tool registration coerces unset policy metadata to
+        # False.  LiteLLM then serializes those non-standard fields into the
+        # function declaration, which Mistral rejects at request validation.
+        payload = registered.to_dict()
+        assert "requires_confirmation" not in payload
+        assert "external_execution" not in payload
 
     def test_registers_tools(self):
         @tool(description="Tool A")

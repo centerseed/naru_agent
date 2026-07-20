@@ -145,6 +145,15 @@ class NaruToolkit:
                     entrypoint=fn,
                     skip_entrypoint_processing=True,
                 ))
+                # Agno 2.5.x's decorated-tool path coerces unset policy fields
+                # to False.  Those are Agno execution metadata, not provider
+                # function-schema fields; LiteLLM otherwise forwards them and
+                # Mistral rejects the complete request.  Restore "unset" after
+                # registration so Function.to_dict() omits them.
+                registered = self._toolkit.functions.get(t.name)
+                if registered is not None:
+                    registered.requires_confirmation = None
+                    registered.external_execution = None
             except Exception:
                 logger.exception("Failed to register tool '%s'", t.name)
 
