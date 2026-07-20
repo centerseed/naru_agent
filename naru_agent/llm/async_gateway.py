@@ -24,6 +24,10 @@ from typing import Any
 import litellm
 
 from naru_agent.llm.delta_sink import DeltaSink, current_delta_sink
+from naru_agent.llm.attempt_observer import (
+    LLMAttemptObservation,
+    observe_attempt,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +130,57 @@ def _last_model_retry_schedule() -> list[float]:
     return [_TRANSIENT_BACKOFF_S * (i + 1) for i in range(_MAX_TRANSIENT_RETRIES)]
 
 
+def _failure_reason(exc: BaseException) -> str:
+    if isinstance(exc, asyncio.TimeoutError) or type(exc).__name__ == "Timeout":
+        return "timeout"
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    if status is None:
+        status = getattr(exc, "status_code", None)
+    if status == 429 or "429" in str(exc) or "RESOURCE_EXHAUSTED" in str(exc):
+        return "rate_limited"
+    if status in {500, 502, 503, 504}:
+        return "unavailable"
+    if isinstance(exc, ConnectionError) or "Connection reset" in str(exc):
+        return "connection"
+    return "transient"
+
+
+def _observe_provider_attempt(
+    *,
+    params: dict,
+    response: Any,
+    started: float,
+    outcome: str,
+    fallback_reason: str | None,
+) -> None:
+    raw_model = str(params.get("model") or "unknown")
+    provider, separator, model = raw_model.partition("/")
+    if not separator:
+        provider, model = "unknown", raw_model
+    usage = getattr(response, "usage", None)
+    input_tokens = max(0, int(getattr(usage, "prompt_tokens", 0) or 0))
+    output_tokens = max(0, int(getattr(usage, "completion_tokens", 0) or 0))
+    cost_microusd = 0
+    if response is not None:
+        try:
+            cost_microusd = max(
+                0,
+                round(float(litellm.completion_cost(completion_response=response)) * 1_000_000),
+            )
+        except Exception:
+            cost_microusd = 0
+    observe_attempt(LLMAttemptObservation(
+        provider=provider,
+        model=model,
+        outcome=outcome,
+        latency_ms=max(0, round((time.monotonic() - started) * 1000)),
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cost_microusd=cost_microusd,
+        fallback_reason=fallback_reason,
+    ))
+
+
 class AsyncLLMGateway:
     """並發安全的 async LLM 出口：per-call semaphore + asyncio.wait_for 真取消。"""
 
@@ -215,15 +270,37 @@ class AsyncLLMGateway:
             except asyncio.TimeoutError:
                 raise LLMBusyError("llm concurrency saturated")
             backoff = None
+            started = time.monotonic()
             try:
-                return await asyncio.wait_for(
+                response = await asyncio.wait_for(
                     self._acompletion(params, sink), timeout=timeout_s)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
+                _observe_provider_attempt(
+                    params=params, response=response, started=started,
+                    outcome="success", fallback_reason=None,
+                )
+                return response
+            except asyncio.TimeoutError:
                 # 硬 deadline / 取消：不重試（重試會超出呼叫端時間預算），直接上拋。
                 # (逾時的「換家」由 acomplete 決策:非最後一顆 → 切 fallback;最後一顆 → 上拋。)
+                _observe_provider_attempt(
+                    params=params, response=None, started=started,
+                    outcome="retryable_error", fallback_reason="timeout",
+                )
+                raise
+            except asyncio.CancelledError:
+                _observe_provider_attempt(
+                    params=params, response=None, started=started,
+                    outcome="cancelled", fallback_reason=None,
+                )
                 raise
             except Exception as exc:  # noqa: BLE001 — 由 _is_transient_llm_error 分流
-                if not (allow_retry and _is_transient_llm_error(exc) and attempt < _MAX_TRANSIENT_RETRIES):
+                transient = _is_transient_llm_error(exc)
+                _observe_provider_attempt(
+                    params=params, response=None, started=started,
+                    outcome=("retryable_error" if transient else "permanent_error"),
+                    fallback_reason=(_failure_reason(exc) if transient else None),
+                )
+                if not (allow_retry and transient and attempt < _MAX_TRANSIENT_RETRIES):
                     raise
                 attempt += 1
                 # same-model 重試 = 重問一次,已串出去的半句不會出現在最終答案裡。
@@ -248,15 +325,32 @@ class AsyncLLMGateway:
             if not self._sync_sem.acquire(timeout=self._admit_timeout_s):
                 raise LLMBusyError("llm concurrency saturated (sync)")
             backoff = None
+            started = time.monotonic()
             try:
-                return litellm.completion(**params, timeout=timeout_s, num_retries=0)
+                response = litellm.completion(
+                    **params, timeout=timeout_s, num_retries=0)
+                _observe_provider_attempt(
+                    params=params, response=response, started=started,
+                    outcome="success", fallback_reason=None,
+                )
+                return response
             except litellm.Timeout:
                 # 硬 deadline:逾時不 same-model 重試(重試會超出呼叫端時間預算),對齊 async _call
                 # 對 asyncio.TimeoutError 的處理。非最後一顆的逾時「換家」由 complete_sync 外層決策
                 # (litellm.Timeout 是 transient,remaining 有就切下一家)。
+                _observe_provider_attempt(
+                    params=params, response=None, started=started,
+                    outcome="retryable_error", fallback_reason="timeout",
+                )
                 raise
             except Exception as exc:  # noqa: BLE001 — 由 _is_transient_llm_error 分流
-                if not (allow_retry and _is_transient_llm_error(exc)
+                transient = _is_transient_llm_error(exc)
+                _observe_provider_attempt(
+                    params=params, response=None, started=started,
+                    outcome=("retryable_error" if transient else "permanent_error"),
+                    fallback_reason=(_failure_reason(exc) if transient else None),
+                )
+                if not (allow_retry and transient
                         and attempt < _MAX_TRANSIENT_RETRIES):
                     raise
                 attempt += 1
